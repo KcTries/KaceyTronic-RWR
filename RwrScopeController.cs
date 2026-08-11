@@ -1951,6 +1951,7 @@ namespace TraditionalRWR
             { "ARH1", "98" }, // NL-98
             { "AAM4", "36" }, // AAM-36 Scimitar
             { "AAM2", "29" }, // AAM-29 Scythe
+            { "Aryx_Missile_AAM45", "45" }, // AAM-45 Sabre (FS-41 Eclipse)
         };
 
         private static string GetMissileDesignation(Missile missile)
@@ -2794,6 +2795,15 @@ namespace TraditionalRWR
             { "AssaultCarrier1", "AAS" }, // Annex
             { "Destroyer1", "DDG" },     // Dynamo
             { "FleetCarrier1", "CV" },   // Hyperion
+
+            // Aryx Naval Expansion (NAVEX) + FS-41 Eclipse's pair of carriers.
+            { "Aryx_StrikeCarrier1", "CGN" },       // Andromeda Class Cruiser
+            { "Aryx_SupplyShip1", "AP" },           // Atlas Class Supply Ship
+            { "Aryx_EscortCarrier1", "CVE" },       // Devotion Class Light Carrier
+            { "Aryx_LightCATOBAR1", "CV" },         // Helion Class Carrier
+            { "Aryx_HeavyFrigate1", "FFG" },        // Ironside Class Frigate
+            { "Aryx_Supercarrier1", "CVN" },        // Penumbra Class Supercarrier (FS-41 bundle)
+            { "Aryx_MissileFrigate_Styx", "PG" },   // Styx Class Missile Cutter
         };
 
         // Ground vehicles and buildings, also keyed by jsonKey. Note
@@ -2804,6 +2814,7 @@ namespace TraditionalRWR
             { "HLT-R", "ROW" },         // HLT Radar Truck
             { "Truck2-R", "ROW" },      // MSV Radar
             { "radarStation1", "EW" }, // Radar Station
+            { "MC260_RadarContainer", "CNT" }, // MC-260 Chimera's mobile Radar Container
         };
 
         // Rank 0's own, cruder set of designators: only a handful of
@@ -2882,6 +2893,7 @@ namespace TraditionalRWR
             { "HLT-R", "9" },          // HLT Radar Truck
             { "Truck2-R", "9" },       // MSV Radar
             { "radarStation1", "EW" }, // Radar Station
+            { "MC260_RadarContainer", "CNT" }, // MC-260 Chimera's mobile Radar Container
         };
 
         private string GetRank1Designation(Unit emitter)

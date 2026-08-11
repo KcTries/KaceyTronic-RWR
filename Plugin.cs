@@ -5,7 +5,7 @@ using UnityEngine;
 
 namespace TraditionalRWR
 {
-    [BepInPlugin("pavehog727.traditionalrwr", "KaceyTronic-RWR-1.0", "1.0.0")]
+    [BepInPlugin("pavehog727.traditionalrwr", "KaceyTronic-RWR-1.0", "1.1.0")]
     public class Plugin : BaseUnityPlugin
     {
         private void Awake()
