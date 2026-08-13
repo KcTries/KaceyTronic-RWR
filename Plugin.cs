@@ -5,7 +5,7 @@ using UnityEngine;
 
 namespace TraditionalRWR
 {
-    [BepInPlugin("pavehog727.traditionalrwr", "KaceyTronic-RWR-1.0", "1.1.0")]
+    [BepInPlugin("pavehog727.traditionalrwr", "KaceyTronic-RWR-1.0", "1.2.0")]
     public class Plugin : BaseUnityPlugin
     {
         private void Awake()
@@ -34,6 +34,28 @@ namespace TraditionalRWR
             maxRangeKm.SettingChanged += (sender, args) =>
             {
                 RwrScopeController.MaxDisplayRangeMeters = maxRangeKm.Value * 1000f;
+            };
+
+            ConfigEntry<bool> simpleShipDesignators = Config.Bind(
+                "General",
+                "Use Simple Ship Designators",
+                false,
+                "Changes the realistic (but confusing) designators for naval units to more simple ones based on their class name. For example FFL (Argus) FS (Shard) to ARG (Argus) SHD (Shard)");
+            RwrScopeController.UseSimpleShipDesignators = simpleShipDesignators.Value;
+            simpleShipDesignators.SettingChanged += (sender, args) =>
+            {
+                RwrScopeController.UseSimpleShipDesignators = simpleShipDesignators.Value;
+            };
+
+            ConfigEntry<bool> notchLineOnAllRanks = Config.Bind(
+                "General",
+                "Enable Notch line display for every Rank",
+                false,
+                "Turns the notch line on for ranks 1-3 when targeted by a emitter.");
+            RwrScopeController.NotchLineOnAllRanks = notchLineOnAllRanks.Value;
+            notchLineOnAllRanks.SettingChanged += (sender, args) =>
+            {
+                RwrScopeController.NotchLineOnAllRanks = notchLineOnAllRanks.Value;
             };
 
             BindRwrQualityOverrides();
@@ -186,6 +208,17 @@ namespace TraditionalRWR
                     new ConfigurationManagerAttributes { IsAdvanced = true, Order = 30 }));
             RwrScopeController.DevToolsEnabled = devLogging.Value;
             devLogging.SettingChanged += (sender, args) => RwrScopeController.DevToolsEnabled = devLogging.Value;
+
+            ConfigEntry<bool> bestFont = Config.Bind(
+                section,
+                "Best Font",
+                false,
+                new ConfigDescription(
+                    "Changes the typeface to the best typeface",
+                    null,
+                    new ConfigurationManagerAttributes { IsAdvanced = true, Order = 40 }));
+            RwrScopeController.BestFontEnabled = bestFont.Value;
+            bestFont.SettingChanged += (sender, args) => RwrScopeController.BestFontEnabled = bestFont.Value;
 
             ConfigEntry<bool> funnyMode = Config.Bind(
                 section,

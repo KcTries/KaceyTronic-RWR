@@ -152,11 +152,19 @@ namespace TraditionalRWR
                     else
                     {
                         UpdateFunnyModeColors();
+                        if (BestFontEnabled != _lastBestFontEnabled)
+                        {
+                            _lastBestFontEnabled = BestFontEnabled;
+                            RefreshAllLabelFonts();
+                        }
                         EnsureSubscribed();
                         EnsureMissileWarningSubscribed();
                         UpdateContacts();
                         UpdateArhMissileContacts();
                         UpdateRank4NotchLines();
+                        CleanupStaleIrMissiles();
+                        UpdateIrWarningRing(_rank0IrArcImages, 0, ref _rank0IrRingVisible);
+                        UpdateIrWarningRing(_rank4IrArcImages, 4, ref _rank4IrRingVisible);
                         UpdateJamGhostContacts();
                         UpdateJamLineOfBearing();
                         UpdateSplashScreen();
@@ -200,6 +208,23 @@ namespace TraditionalRWR
         private const float Rank2TickLength = 8f;
         private const float Rank2TickThickness = 2f;
         private const float Rank2TickInset = 6f;
+
+        // Ranks 0 and 4 both: a thin secondary ring just outside the main
+        // ring, split into 4 quadrants (Rank 0) or 8 finer divisions (Rank
+        // 4 -- sharper gear resolves direction more precisely, same reason
+        // Rank 2's ticks are 8-way while Rank 0's quadrants are 4-way).
+        // Hidden by default; whichever division an inbound IR (heat-
+        // seeking) missile is approaching from flashes. IR missiles have no
+        // radar of their own for onRadarWarning to pick up, so this is
+        // driven by MissileWarning instead (same reasoning as SARH).
+        private const float IrRingDiameter = ScopeDiameter + 12f;
+        private const float IrRingThickness = 2f;
+        private const float IrFlashInterval = 0.15f;
+        // Tied to ThreatFlashColor ("Threat Secondary Color" in
+        // ConfigManager) rather than a fixed hue -- same field the SARH
+        // flash reads, so this also rides along with Funny Mode's rainbow
+        // cycling like everything else that reads it does.
+        private static Color IrWarningColor => WithOpacity(new Color(ThreatFlashColor.r, ThreatFlashColor.g, ThreatFlashColor.b, 0.95f));
 
         // Rank 4: dotted line from center to the ring, plus a small bar at
         // the ring, toward anything locking the player or any inbound
@@ -332,6 +357,7 @@ namespace TraditionalRWR
         // Built once, unlike contacts which get recolored every frame --
         // kept so UpdateThemedStaticElements() can retint these live when
         // the user changes RWR color/opacity in ConfigManager.
+        private Image _backgroundImage;
         private Image _normalRingImage;
         private Image _normalHalfRingImage;
         private Image _normalReticleHorizontalImage;
@@ -340,6 +366,17 @@ namespace TraditionalRWR
         private Image _rank0HalfRingImage;
         private Image _rank0CrossHorizontalImage;
         private Image _rank0CrossVerticalImage;
+        // One shared arc sprite per ring (spans division 0's own slice),
+        // reused across all instances of that ring via rotation -- same
+        // sprite-reuse reasoning as the other cached shapes further down.
+        // Rank 0 (4-way, 90 degrees/division) and Rank 4 (8-way, 45
+        // degrees/division) need their own sprite each -- the arc's shape
+        // itself differs, not just how many times it's rotated around.
+        private Sprite _rank0IrArcSprite;
+        private readonly Image[] _rank0IrArcImages = new Image[4];
+        private Sprite _rank4IrArcSprite;
+        private readonly Image[] _rank4IrArcImages = new Image[8];
+        private RectTransform _rank4IrOverlayRoot;
         private readonly List<Image> _rank2TickImages = new List<Image>();
         private RectTransform _rank4NotchOverlayRoot;
         private readonly List<GameObject> _rank4NotchLines = new List<GameObject>();
@@ -386,6 +423,7 @@ namespace TraditionalRWR
             _rank0InnerElements = BuildOverlayRoot(_rank0OverlayRoot, "Rank0InnerElements");
             _rank0HalfRingImage = BuildHalfRangeRing(_rank0InnerElements, Rank0RingThickness);
             (_rank0CrossHorizontalImage, _rank0CrossVerticalImage) = BuildFullCross(_rank0InnerElements);
+            BuildIrWarningRing(_rank0OverlayRoot, ref _rank0IrArcSprite, _rank0IrArcImages, "Rank0IrArc");
 
             _rank2TicksOverlayRoot = BuildOverlayRoot(_scopeRoot, "Rank2TicksOverlay");
             BuildRank2Ticks(_rank2TicksOverlayRoot);
@@ -393,6 +431,9 @@ namespace TraditionalRWR
             // Rank 4 lines are built dynamically each frame, not here --
             // this is just the container they get parented under.
             _rank4NotchOverlayRoot = BuildOverlayRoot(_scopeRoot, "Rank4NotchOverlay");
+
+            _rank4IrOverlayRoot = BuildOverlayRoot(_scopeRoot, "Rank4IrOverlay");
+            BuildIrWarningRing(_rank4IrOverlayRoot, ref _rank4IrArcSprite, _rank4IrArcImages, "Rank4IrArc");
 
             // Also built dynamically each frame, not here -- just its container.
             _jamLobOverlayRoot = BuildOverlayRoot(_scopeRoot, "JamLobOverlay");
@@ -464,7 +505,7 @@ namespace TraditionalRWR
             }
             if (_rank4NotchOverlayRoot != null)
             {
-                _rank4NotchOverlayRoot.gameObject.SetActive(_currentRwrQuality == 4);
+                _rank4NotchOverlayRoot.gameObject.SetActive(ShouldShowNotchLine(_currentRwrQuality));
             }
         }
 
@@ -473,6 +514,10 @@ namespace TraditionalRWR
         // color/opacity change wouldn't show up until the next respawn.
         private void UpdateThemedStaticElements()
         {
+            if (_backgroundImage != null)
+            {
+                _backgroundImage.color = WithOpacity(BackgroundBaseColor);
+            }
             if (_normalRingImage != null)
             {
                 _normalRingImage.color = Themed(0.8f);
@@ -662,7 +707,7 @@ namespace TraditionalRWR
                 // Only re-enable if the current rank would actually show it --
                 // ApplyOverlayVisibility already gates this per-rank, so
                 // hiding unconditionally is safe but re-showing must respect it.
-                _rank4NotchOverlayRoot.gameObject.SetActive(visible && _currentRwrQuality == 4);
+                _rank4NotchOverlayRoot.gameObject.SetActive(visible && ShouldShowNotchLine(_currentRwrQuality));
             }
             if (_jamLobOverlayRoot != null)
             {
@@ -725,6 +770,15 @@ namespace TraditionalRWR
             }
         }
 
+        // Base color/alpha before ThemeOpacity is applied -- was previously
+        // baked straight into the sprite's own texture (see
+        // CreateRoundedRectSprite's fillColor param), which is why the
+        // opacity slider never touched it: every other shape here (rings,
+        // reticle, diamond) bakes a plain white mask and drives its actual
+        // color through Image.color instead, which is the only thing
+        // UpdateThemedStaticElements() can retint live.
+        private static readonly Color BackgroundBaseColor = new Color(0.02f, 0.05f, 0.03f, 0.5f);
+
         private void BuildBackground(RectTransform parent)
         {
             GameObject backgroundObject = new GameObject("Background", typeof(RectTransform), typeof(Image));
@@ -736,8 +790,10 @@ namespace TraditionalRWR
             rect.offsetMax = Vector2.zero;
 
             Image image = backgroundObject.GetComponent<Image>();
-            image.sprite = CreateRoundedRectSprite(PanelSize, PanelSize, 18f, new Color(0.02f, 0.05f, 0.03f, 0.5f));
+            image.sprite = CreateRoundedRectSprite(PanelSize, PanelSize, 18f, Color.white);
+            image.color = WithOpacity(BackgroundBaseColor);
             image.raycastTarget = false;
+            _backgroundImage = image;
         }
 
         // Set from Plugin.Awake() ("RWR Position" section) and live-updated
@@ -878,6 +934,44 @@ namespace TraditionalRWR
             return (horizontal, vertical);
         }
 
+        // N instances (N = arcImages.Length -- 4 for Rank 0, 8 for Rank 4)
+        // of one shared arc sprite spanning a single division's own slice,
+        // each rotated to cover a different division -- same
+        // -degrees-per-index rotation convention as everywhere else
+        // bearings get turned into a Z euler angle in this file. All start
+        // inactive; UpdateIrWarningRing() activates only the division(s)
+        // an inbound IR missile currently occupies.
+        private void BuildIrWarningRing(RectTransform parent, ref Sprite cachedSprite, Image[] arcImages, string namePrefix)
+        {
+            int divisionCount = arcImages.Length;
+            if (cachedSprite == null)
+            {
+                cachedSprite = CreateArcSegmentSprite(Mathf.RoundToInt(IrRingDiameter), IrRingThickness, divisionCount);
+            }
+
+            float divisionSpan = 360f / divisionCount;
+            for (int division = 0; division < divisionCount; division++)
+            {
+                GameObject arcObject = new GameObject(namePrefix + division, typeof(RectTransform), typeof(Image));
+                RectTransform rect = arcObject.GetComponent<RectTransform>();
+                rect.SetParent(parent, false);
+                rect.anchorMin = new Vector2(0.5f, 0.5f);
+                rect.anchorMax = new Vector2(0.5f, 0.5f);
+                rect.pivot = new Vector2(0.5f, 0.5f);
+                rect.sizeDelta = new Vector2(IrRingDiameter, IrRingDiameter);
+                rect.anchoredPosition = Vector2.zero;
+                rect.localRotation = Quaternion.Euler(0f, 0f, -divisionSpan * division);
+
+                Image image = arcObject.GetComponent<Image>();
+                image.sprite = cachedSprite;
+                image.color = IrWarningColor;
+                image.raycastTarget = false;
+                arcObject.SetActive(false);
+
+                arcImages[division] = image;
+            }
+        }
+
         private Image CreateCrossBar(RectTransform parent, string name, Vector2 size)
         {
             GameObject barObject = new GameObject(name, typeof(RectTransform), typeof(Image));
@@ -921,6 +1015,59 @@ namespace TraditionalRWR
                         if (dist < innerRadius + 1f)
                         {
                             alpha = Mathf.Min(alpha, Mathf.Clamp01(dist - innerRadius));
+                        }
+                    }
+
+                    texture.SetPixel(x, y, new Color(1f, 1f, 1f, alpha));
+                }
+            }
+
+            texture.Apply();
+            return Sprite.Create(texture, new Rect(0f, 0f, size, size), new Vector2(0.5f, 0.5f));
+        }
+
+        // Same ring-with-anti-aliased-edges technique as CreateRingSprite,
+        // but only fills in division 0's own slice (0 to 360/divisionCount
+        // degrees -- for divisionCount=4 that's quadrant 0/NE, matching
+        // GetQuadrantIndex's own convention) -- the other divisions reuse
+        // this same sprite rotated around rather than each getting their
+        // own texture. Same Atan2(x, y) bearing convention as
+        // BearingToDirection (0 degrees = up).
+        private static Sprite CreateArcSegmentSprite(int size, float thickness, int divisionCount)
+        {
+            float divisionSpan = 360f / divisionCount;
+            Texture2D texture = new Texture2D(size, size, TextureFormat.RGBA32, false);
+            texture.wrapMode = TextureWrapMode.Clamp;
+
+            float radius = size / 2f;
+            Vector2 center = new Vector2(radius, radius);
+            float innerRadius = radius - thickness;
+
+            for (int y = 0; y < size; y++)
+            {
+                for (int x = 0; x < size; x++)
+                {
+                    float px = (x + 0.5f) - center.x;
+                    float py = (y + 0.5f) - center.y;
+                    float dist = Mathf.Sqrt(px * px + py * py);
+                    float alpha = 0f;
+
+                    if (dist <= radius && dist >= innerRadius)
+                    {
+                        float bearing = Mathf.Atan2(px, py) * Mathf.Rad2Deg;
+                        float normalizedBearing = ((bearing % 360f) + 360f) % 360f;
+
+                        if (normalizedBearing >= 0f && normalizedBearing < divisionSpan)
+                        {
+                            alpha = 1f;
+                            if (dist > radius - 1f)
+                            {
+                                alpha = Mathf.Clamp01(radius - dist);
+                            }
+                            if (dist < innerRadius + 1f)
+                            {
+                                alpha = Mathf.Min(alpha, Mathf.Clamp01(dist - innerRadius));
+                            }
                         }
                     }
 
@@ -982,6 +1129,18 @@ namespace TraditionalRWR
         // 50km), and live-updated if the user changes it in ConfigManager.
         public static float MaxDisplayRangeMeters = 50000f;
 
+        // Set from Plugin.Awake() ("General" section), live-updated in
+        // ConfigManager. Swaps ship designators from ShipCodeOverrides
+        // (real-world-style hull codes, e.g. FFL/CVE) to
+        // SimpleShipCodeOverrides (simpler class-name-based codes, e.g.
+        // ARG/CSR) wherever a ship's designation is looked up.
+        public static bool UseSimpleShipDesignators;
+
+        // Set from Plugin.Awake() ("General" section), live-updated in
+        // ConfigManager. Extends the notch line (normally Rank 4 only) down
+        // to ranks 1-3 as well -- see ShouldShowNotchLine.
+        public static bool NotchLineOnAllRanks;
+
         // Set from Plugin.Awake() ("RWR Appearance" section), live-updated
         // in ConfigManager. ThemeColor's own alpha is ignored -- opacity is
         // ThemeOpacity alone. Base scope elements (rings, reticle, normal
@@ -1015,6 +1174,8 @@ namespace TraditionalRWR
         public static bool FunnyModeEnabled;
         public static bool DealerModeEnabled;
         public static int DealerModeBpm = 130;
+        public static bool BestFontEnabled;
+        private bool _lastBestFontEnabled;
 
         private const float FunnyModeCycleSeconds = 6f;
         // Peak squish: top edge comes down to half the panel's height, and
@@ -1252,6 +1413,11 @@ namespace TraditionalRWR
         private MissileWarning _missileWarningSystem;
         private bool _missileWarningSubscribed;
         private readonly Dictionary<Unit, int> _sarhThreatCounts = new Dictionary<Unit, int>();
+        // Rank 0 and Rank 4's IR warning rings (see UpdateIrWarningRing).
+        // Just a presence set, not keyed to any per-missile state -- which
+        // division(s) it implies gets recomputed fresh every frame, per
+        // ring, from each missile's current position.
+        private readonly HashSet<Missile> _irMissileContacts = new HashSet<Missile>();
 
         private const float MissileResolveDelaySeconds = 1f;
         // Rank 3+: sharper gear resolves an ARH missile's designation faster.
@@ -1273,6 +1439,23 @@ namespace TraditionalRWR
             // missile is recognized as contested (closest-wins) even though
             // the missile icon itself lives outside _contacts.
             public int Rank0Quadrant = -1;
+
+            // Icon lifecycle is now driven by radar pings (onRadarWarning),
+            // not MissileWarning -- refreshed every time this missile's own
+            // active seeker radar is detected, same staleness convention as
+            // the general _contacts dictionary. MissileWarning only
+            // controls HasMissileWarning below.
+            public float LastRadarPingTime;
+
+            // True once this specific missile is confirmed actually
+            // locked onto/guiding toward the player (MissileWarning fired
+            // for it), not just detected as a nearby radar emitter. Ranks
+            // 0-3 hold off drawing the connecting line to center until
+            // this is true, so a missile that's merely radar-searching
+            // nearby (not threatening the player specifically) shows its
+            // icon without implying a confirmed threat bearing. Rank 4
+            // ignores this and always draws its line once the icon exists.
+            public bool HasMissileWarning;
         }
 
         private readonly Dictionary<Missile, ArhMissileContact> _arhMissileContacts = new Dictionary<Missile, ArhMissileContact>();
@@ -1372,7 +1555,7 @@ namespace TraditionalRWR
             {
                 return new List<string> { "SHP" };
             }
-            return new List<string>(ShipCodeOverrides.Values);
+            return new List<string>(ActiveShipCodeOverrides.Values);
         }
 
         private List<string> GetJamGroundDesignationPool()
@@ -1691,6 +1874,7 @@ namespace TraditionalRWR
             _contacts.Clear();
             _sarhThreatCounts.Clear();
             _arhMissileContacts.Clear();
+            _irMissileContacts.Clear();
             _arhConnectingLines.Clear();
             _jamGhostContacts.Clear();
             _lastJamTime = float.NegativeInfinity;
@@ -1714,9 +1898,14 @@ namespace TraditionalRWR
             _rank0HalfRingImage = null;
             _rank0CrossHorizontalImage = null;
             _rank0CrossVerticalImage = null;
+            Array.Clear(_rank0IrArcImages, 0, _rank0IrArcImages.Length);
+            _rank0IrRingVisible = false;
             _rank2TickImages.Clear();
             _rank4NotchOverlayRoot = null;
             _rank4NotchLines.Clear();
+            _rank4IrOverlayRoot = null;
+            Array.Clear(_rank4IrArcImages, 0, _rank4IrArcImages.Length);
+            _rank4IrRingVisible = false;
             _jamLobOverlayRoot = null;
             _jamLobLines.Clear();
             _lastJammingUnit = null;
@@ -1843,9 +2032,20 @@ namespace TraditionalRWR
 
                 if (seeker is ARHSeeker)
                 {
-                    // ARH: the missile has its own active radar seeker --
-                    // show it as its own contact.
+                    // ARH: the icon itself is now created/kept alive by
+                    // radar pings (OnRadarWarningReceived), not here -- this
+                    // just confirms the missile is actually locked onto/
+                    // guiding toward the player, which is what unlocks the
+                    // connecting line on ranks 0-3 (see UpdateArhMissileContacts).
+                    // Defensive CreateArhMissileContact call in case
+                    // MissileWarning somehow fires before any radar ping has
+                    // -- shouldn't normally happen, but avoids a null lookup
+                    // below if it does.
                     CreateArhMissileContact(missile);
+                    if (_arhMissileContacts.TryGetValue(missile, out ArhMissileContact arhContact))
+                    {
+                        arhContact.HasMissileWarning = true;
+                    }
                 }
                 else if (seeker is SARHSeeker sarhSeeker)
                 {
@@ -1859,6 +2059,18 @@ namespace TraditionalRWR
                     {
                         _sarhThreatCounts[sarhSourceUnit] = _sarhThreatCounts.TryGetValue(sarhSourceUnit, out int count) ? count + 1 : 1;
                     }
+                }
+                else if (seeker is IRSeeker)
+                {
+                    // IR (heat-seeking): no radar of its own for
+                    // onRadarWarning to ever pick up, so MissileWarning is
+                    // the only signal available at all, same reasoning as
+                    // SARH above. Consumed by both Rank 0 and Rank 4's
+                    // warning rings (UpdateIrWarningRing) -- tracked
+                    // regardless of rank since a HashSet add is cheap and
+                    // there's no reason to miss the ON event just because
+                    // the current rank doesn't use it.
+                    _irMissileContacts.Add(missile);
                 }
 
                 WriteDebug($"Missile warning ON: {missile.name} seekerType={(seeker != null ? seeker.GetType().Name : "null")} owner={(missile.owner != null ? missile.owner.name : "null")}");
@@ -1879,14 +2091,18 @@ namespace TraditionalRWR
                     return;
                 }
 
+                // Lost lock on the player specifically -- doesn't mean the
+                // missile stopped radar-searching nearby, so only clear the
+                // "confirmed threat" flag (hides the line again on ranks
+                // 0-3) rather than destroying the contact. The icon itself
+                // now lives/dies by radar-ping staleness in
+                // UpdateArhMissileContacts, same as any other contact.
                 if (_arhMissileContacts.TryGetValue(missile, out ArhMissileContact arhContact))
                 {
-                    if (arhContact.Group != null)
-                    {
-                        Destroy(arhContact.Group.gameObject);
-                    }
-                    _arhMissileContacts.Remove(missile);
+                    arhContact.HasMissileWarning = false;
                 }
+
+                _irMissileContacts.Remove(missile);
 
                 // Must resolve the exact same source unit as OnMissileWarningReceived
                 // did when it incremented, or the reference count never balances.
@@ -1941,7 +2157,23 @@ namespace TraditionalRWR
                 DesignationLabel = label,
                 CreationTime = Time.unscaledTime,
                 Resolved = _currentRwrQuality == 0,
+                LastRadarPingTime = Time.unscaledTime,
+                HasMissileWarning = false,
             };
+        }
+
+        // Called from OnRadarWarningReceived every time this missile's own
+        // seeker radar is detected -- creates the contact if it doesn't
+        // exist yet (first ping) and refreshes its staleness timer either
+        // way, so the icon's lifecycle tracks radar visibility rather than
+        // MissileWarning.
+        private void RegisterArhRadarPing(Missile missile)
+        {
+            CreateArhMissileContact(missile);
+            if (_arhMissileContacts.TryGetValue(missile, out ArhMissileContact contact))
+            {
+                contact.LastRadarPingTime = Time.unscaledTime;
+            }
         }
 
         // The three ARH missiles in the game, keyed by jsonKey since they
@@ -1988,7 +2220,13 @@ namespace TraditionalRWR
                 Missile missile = kvp.Key;
                 ArhMissileContact contact = kvp.Value;
 
-                if (missile == null || contact.Group == null)
+                // Icon lifecycle now tracks radar-ping staleness (same
+                // ContactBrightSeconds window the general _contacts
+                // dictionary uses) rather than MissileWarning, since the
+                // missile might still exist and still be radar-searching
+                // after it stops threatening the player specifically.
+                bool radarSilent = Time.unscaledTime - contact.LastRadarPingTime > ContactBrightSeconds;
+                if (missile == null || contact.Group == null || radarSilent)
                 {
                     if (contact.Group != null)
                     {
@@ -2050,7 +2288,17 @@ namespace TraditionalRWR
                         contact.SymbolTransform.localRotation = Quaternion.Euler(0f, 0f, -(bearingDegrees + 180f));
                     }
 
-                    CreateArhConnectingLine(bearingDegrees, distance);
+                    // Ranks 0-3: only draw the line once this missile is a
+                    // confirmed threat to the player (MissileWarning fired),
+                    // not just a nearby radar-detected emitter -- the icon
+                    // alone communicates "ARH missile radar active nearby,"
+                    // the line specifically communicates "this one's locked
+                    // onto you." Rank 4's gear is good enough to show the
+                    // line unconditionally, matching its existing behavior.
+                    if (_currentRwrQuality == 4 || contact.HasMissileWarning)
+                    {
+                        CreateArhConnectingLine(bearingDegrees, distance);
+                    }
                 }
             }
 
@@ -2127,12 +2375,22 @@ namespace TraditionalRWR
             }
         }
 
-        // Rank 4 only: a notch line 90 degrees off the bearing of anything
-        // locking the player or any inbound missile (ARH/SARH) -- flying
-        // that heading is what actually notches a Doppler-guided threat,
-        // unlike a line pointing straight at it. PERF: rebuilt from scratch
-        // every frame rather than diffed per-threat -- simpler, and fine
-        // since the threat count stays small.
+        // Normally Rank 4 only; "Enable Notch line display for every Rank"
+        // (General tab) extends it down to ranks 1-3 too. Rank 0 is
+        // excluded either way -- it doesn't distinguish targeted-vs-not in
+        // the first place (no color coding at that quality), so there's no
+        // "targeted by an emitter" signal to hang a notch line off of.
+        private static bool ShouldShowNotchLine(int rwrQuality)
+        {
+            return rwrQuality == 4 || (NotchLineOnAllRanks && rwrQuality >= 1 && rwrQuality <= 3);
+        }
+
+        // A notch line 90 degrees off the bearing of anything locking the
+        // player or any inbound missile (ARH/SARH) -- flying that heading
+        // is what actually notches a Doppler-guided threat, unlike a line
+        // pointing straight at it. PERF: rebuilt from scratch every frame
+        // rather than diffed per-threat -- simpler, and fine since the
+        // threat count stays small.
         private void UpdateRank4NotchLines()
         {
             foreach (GameObject line in _rank4NotchLines)
@@ -2144,7 +2402,29 @@ namespace TraditionalRWR
             }
             _rank4NotchLines.Clear();
 
-            if (_currentRwrQuality != 4 || _rank4NotchOverlayRoot == null || _playerAircraft == null)
+            if (_rank4NotchOverlayRoot == null)
+            {
+                return;
+            }
+
+            // ApplyOverlayVisibility() only runs at scope build time and on
+            // an actual aircraft swap -- it never re-fires when
+            // NotchLineOnAllRanks changes live in ConfigManager. Without
+            // this, flipping that toggle mid-flight would create the dash/
+            // arc line segments below just fine, but parent them under a
+            // GameObject that's still inactive from the last time
+            // visibility was computed, so they'd silently not render until
+            // the next respawn. Keeping this in sync here every frame
+            // covers both triggers (rank change and live config change)
+            // with one check. Also has to respect the splash screen's own
+            // hiding of this same overlay (SetContactsVisible(false)) --
+            // this method runs every frame regardless of splash state, so
+            // without the !_splashActive check here it would fight that and
+            // re-show the notch line through the splash text.
+            bool shouldShow = ShouldShowNotchLine(_currentRwrQuality) && !_splashActive;
+            _rank4NotchOverlayRoot.gameObject.SetActive(shouldShow);
+
+            if (!shouldShow || _playerAircraft == null)
             {
                 return;
             }
@@ -2164,7 +2444,7 @@ namespace TraditionalRWR
                 bool isSarhThreat = _sarhThreatCounts.ContainsKey(emitter);
                 if (isLockingTarget || isSarhThreat)
                 {
-                    CreateRank4NotchLine(GetBearingForWorldPosition(emitter.transform.position) + 90f, flashColor);
+                    CreateRank4NotchLine(Rank4NotchBearing(GetBearingForWorldPosition(emitter.transform.position)), flashColor);
                 }
             }
 
@@ -2172,7 +2452,7 @@ namespace TraditionalRWR
             {
                 if (kvp.Key != null)
                 {
-                    CreateRank4NotchLine(GetBearingForWorldPosition(kvp.Key.transform.position) + 90f, flashColor);
+                    CreateRank4NotchLine(Rank4NotchBearing(GetBearingForWorldPosition(kvp.Key.transform.position)), flashColor);
                 }
             }
         }
@@ -2227,16 +2507,132 @@ namespace TraditionalRWR
             _rank4NotchLines.Add(arcObject);
         }
 
+        // Tracks whether each ring was left showing anything last frame, so
+        // the "nothing to do" path below can skip touching its Images
+        // entirely once they're already all off, instead of re-issuing
+        // SetActive(false) calls every single frame regardless.
+        private bool _rank0IrRingVisible;
+        private bool _rank4IrRingVisible;
+
+        // Cleans up a missile destroyed without a matching OffMissileWarning
+        // ever arriving (shouldn't normally happen, but avoids leaking an
+        // entry forever if it does). Split out from UpdateIrWarningRing and
+        // run once per frame regardless of rank -- _irMissileContacts is
+        // shared between the Rank 0 and Rank 4 rings, and tying this
+        // cleanup to one specific ring's own "is it relevant this frame"
+        // check would mean it never runs at all while flying anything
+        // ranked 1-3.
+        private void CleanupStaleIrMissiles()
+        {
+            if (_irMissileContacts.Count == 0)
+            {
+                return;
+            }
+
+            List<Missile> stale = null;
+            foreach (Missile missile in _irMissileContacts)
+            {
+                if (missile == null)
+                {
+                    if (stale == null)
+                    {
+                        stale = new List<Missile>();
+                    }
+                    stale.Add(missile);
+                }
+            }
+            if (stale != null)
+            {
+                foreach (Missile missile in stale)
+                {
+                    _irMissileContacts.Remove(missile);
+                }
+            }
+        }
+
+        // Shared by the Rank 0 (4-division) and Rank 4 (8-division) IR
+        // warning rings. Recomputes which division(s) currently have an
+        // inbound IR missile every frame (a missile's bearing can drift as
+        // it flies, same reasoning as ArhMissileContact.Rank0Quadrant),
+        // then flashes just those. Checks _splashActive directly rather
+        // than relying on a separate visibility-sync call --
+        // UpdateRank4NotchLines() originally didn't, and a live
+        // ConfigManager toggle silently not taking effect until next
+        // respawn was the bug that came from it.
+        private void UpdateIrWarningRing(Image[] arcImages, int targetRank, ref bool wasVisible)
+        {
+            if (arcImages[0] == null)
+            {
+                return;
+            }
+
+            // No IR missile has an active MissileWarning at all -- by far
+            // the common case -- so skip the per-division array allocation/
+            // loop/SetActive calls below entirely rather than paying that
+            // cost every frame for nothing. Only actually touches the
+            // Images once, the frame the last threat clears, rather than
+            // repeating no-op SetActive(false) calls forever afterward.
+            bool relevant = _currentRwrQuality == targetRank && _playerAircraft != null && !_splashActive && _irMissileContacts.Count > 0;
+            if (!relevant)
+            {
+                if (wasVisible)
+                {
+                    for (int i = 0; i < arcImages.Length; i++)
+                    {
+                        arcImages[i].gameObject.SetActive(false);
+                    }
+                    wasVisible = false;
+                }
+                return;
+            }
+
+            wasVisible = true;
+
+            int divisionCount = arcImages.Length;
+            float divisionSpan = 360f / divisionCount;
+            bool[] divisionThreatened = new bool[divisionCount];
+            foreach (Missile missile in _irMissileContacts)
+            {
+                if (missile == null)
+                {
+                    continue;
+                }
+                float bearing = ((GetBearingForWorldPosition(missile.transform.position) % 360f) + 360f) % 360f;
+                divisionThreatened[Mathf.Clamp((int)(bearing / divisionSpan), 0, divisionCount - 1)] = true;
+            }
+
+            bool flashOn = Mathf.Repeat(Time.unscaledTime, IrFlashInterval * 2f) < IrFlashInterval;
+            for (int i = 0; i < divisionCount; i++)
+            {
+                arcImages[i].color = IrWarningColor;
+                arcImages[i].gameObject.SetActive(divisionThreatened[i] && flashOn);
+            }
+        }
+
         private void OnRadarWarningReceived(Aircraft.OnRadarWarning e)
         {
             try
             {
-                if (e.emitter == null || e.emitter is Missile)
+                if (e.emitter == null)
                 {
-                    // Missiles are handled entirely by the dedicated
-                    // MissileWarning system (ARH icon / SARH flash) --
-                    // without this they'd also show up here as a second,
-                    // overlapping dome+??? contact.
+                    return;
+                }
+
+                if (e.emitter is Missile missileEmitter)
+                {
+                    // ARH missiles have their own active seeker radar, so
+                    // they show up here like any other emitter -- this is
+                    // now what actually drives the "M" icon's existence,
+                    // not MissileWarning (which only sets HasMissileWarning,
+                    // see OnMissileWarningReceived/Ended). SARH/IR/other
+                    // missile types have no radar of their own to detect,
+                    // so they fall straight through to the same "do
+                    // nothing here" behavior as before -- SARH is still
+                    // handled entirely by the MissileWarning flash logic.
+                    if (missileEmitter.GetComponent<MissileSeeker>() is ARHSeeker)
+                    {
+                        RegisterArhRadarPing(missileEmitter);
+                    }
                     return;
                 }
 
@@ -2549,6 +2945,26 @@ namespace TraditionalRWR
             return Mathf.Atan2(right, forward) * Mathf.Rad2Deg;
         }
 
+        // GetBearingForWorldPosition() is already relative to the player's
+        // own nose (0 = straight ahead), so "closest to the player's
+        // current heading" just means picking whichever of the two
+        // perpendicular options sits closer to 0 -- i.e. whichever notch
+        // heading is the smaller turn away from where the player's already
+        // pointed, rather than always adding 90 and sometimes landing the
+        // "ideal" notch heading behind the aircraft.
+        private static float Rank4NotchBearing(float threatBearingDegrees)
+        {
+            float optionA = NormalizeBearing(threatBearingDegrees + 90f);
+            float optionB = NormalizeBearing(threatBearingDegrees - 90f);
+            return Mathf.Abs(optionA) <= Mathf.Abs(optionB) ? optionA : optionB;
+        }
+
+        // Wraps to (-180, 180].
+        private static float NormalizeBearing(float bearingDegrees)
+        {
+            return Mathf.Repeat(bearingDegrees + 180f, 360f) - 180f;
+        }
+
         private int GetQuadrantForWorldPosition(Vector3 worldPosition)
         {
             float normalized = ((GetBearingForWorldPosition(worldPosition) % 360f) + 360f) % 360f;
@@ -2806,6 +3222,33 @@ namespace TraditionalRWR
             { "Aryx_MissileFrigate_Styx", "PG" },   // Styx Class Missile Cutter
         };
 
+        // "Use Simple Ship Designators" (General tab) alternative to
+        // ShipCodeOverrides above -- same jsonKeys, simpler class-name-based
+        // codes instead of realistic hull-classification codes. Also
+        // incidentally disambiguates two pairs that share a hull code under
+        // the real system (CVE: Cursor/Devotion Class, CV: Hyperion/Helion
+        // Class).
+        private static readonly Dictionary<string, string> SimpleShipCodeOverrides = new Dictionary<string, string>
+        {
+            { "Frigate1", "ARG" },       // Argus
+            { "SmallCarrier1", "CSR" },  // Cursor
+            { "Corvette1", "SHD" },      // Shard
+            { "AssaultCarrier1", "ANX" }, // Annex
+            { "Destroyer1", "DYN" },     // Dynamo
+            { "FleetCarrier1", "HYP" },  // Hyperion
+
+            { "Aryx_StrikeCarrier1", "AND" },       // Andromeda Class Cruiser
+            { "Aryx_SupplyShip1", "ATL" },          // Atlas Class Supply Ship
+            { "Aryx_EscortCarrier1", "DVO" },       // Devotion Class Light Carrier
+            { "Aryx_LightCATOBAR1", "HEL" },        // Helion Class Carrier
+            { "Aryx_HeavyFrigate1", "IRN" },        // Ironside Class Frigate
+            { "Aryx_Supercarrier1", "PNU" },        // Penumbra Class Supercarrier (FS-41 bundle)
+            { "Aryx_MissileFrigate_Styx", "STX" },  // Styx Class Missile Cutter
+        };
+
+        private static Dictionary<string, string> ActiveShipCodeOverrides =>
+            UseSimpleShipDesignators ? SimpleShipCodeOverrides : ShipCodeOverrides;
+
         // Ground vehicles and buildings, also keyed by jsonKey. Note
         // radarStation1's jsonKey is lowercase-r, unlike the others.
         private static readonly Dictionary<string, string> GroundCodeOverrides = new Dictionary<string, string>
@@ -2901,7 +3344,7 @@ namespace TraditionalRWR
             if (emitter is Ship)
             {
                 if (emitter.definition != null && !string.IsNullOrEmpty(emitter.definition.jsonKey)
-                    && ShipCodeOverrides.TryGetValue(emitter.definition.jsonKey, out string shipCode))
+                    && ActiveShipCodeOverrides.TryGetValue(emitter.definition.jsonKey, out string shipCode))
                 {
                     return shipCode;
                 }
@@ -2948,7 +3391,7 @@ namespace TraditionalRWR
 
                 if (!string.IsNullOrEmpty(emitter.definition.jsonKey))
                 {
-                    if (ShipCodeOverrides.TryGetValue(emitter.definition.jsonKey, out string shipCode))
+                    if (ActiveShipCodeOverrides.TryGetValue(emitter.definition.jsonKey, out string shipCode))
                     {
                         return shipCode;
                     }
@@ -3161,6 +3604,14 @@ namespace TraditionalRWR
             return image;
         }
 
+        // The game's own map grid-coordinate label font (GridLabels is
+        // private on DynamicMap's public gridLabels field) -- same
+        // reflection trick used in KcCruiseMissileWaypoints so the RWR's
+        // text visually matches the map's own labels instead of Unity's
+        // generic built-in font.
+        private static readonly FieldInfo GridFontField =
+            typeof(GridLabels).GetField("defaultFont", BindingFlags.NonPublic | BindingFlags.Instance);
+
         private Font _labelFont;
         // PERF: these three are always generated with identical params
         // (color applied separately via Image.color), so they're cached and
@@ -3171,16 +3622,58 @@ namespace TraditionalRWR
         private Sprite _missileRingSprite;
         private Sprite _missileTriangleSprite;
 
+        // "Best Font" (Secrets, see Plugin.cs) overrides the map-grid font
+        // with Arial -- the objectively correct typeface.
+        private Font ResolveLabelFont()
+        {
+            if (BestFontEnabled)
+            {
+                Font arial = Resources.GetBuiltinResource<Font>("Arial.ttf");
+                if (arial != null)
+                {
+                    return arial;
+                }
+            }
+
+            DynamicMap map = SceneSingleton<DynamicMap>.i;
+            Font gridFont = map != null && map.gridLabels != null && GridFontField != null
+                ? GridFontField.GetValue(map.gridLabels) as Font
+                : null;
+
+            Font resolved = gridFont != null ? gridFont : Resources.GetBuiltinResource<Font>("LegacyRuntime.ttf");
+            if (resolved == null)
+            {
+                resolved = Resources.GetBuiltinResource<Font>("Arial.ttf");
+            }
+            return resolved;
+        }
+
+        // Live toggle: existing labels were created with whatever font was
+        // cached at the time, so a mid-flight flip needs to walk every Text
+        // already on screen once -- cheap since it only runs the frame the
+        // setting actually changes (see the _lastBestFontEnabled check in
+        // Update()), not every frame.
+        private void RefreshAllLabelFonts()
+        {
+            _labelFont = ResolveLabelFont();
+            if (_scopeRoot == null)
+            {
+                return;
+            }
+
+            Text[] labels = _scopeRoot.GetComponentsInChildren<Text>(true);
+            for (int i = 0; i < labels.Length; i++)
+            {
+                labels[i].font = _labelFont;
+            }
+        }
+
         private Text CreateLabel(RectTransform parent, string text, Vector2 position, int fontSize, Color color,
             FontStyle fontStyle = FontStyle.Normal, float width = 60f, float height = 16f)
         {
             if (_labelFont == null)
             {
-                _labelFont = Resources.GetBuiltinResource<Font>("LegacyRuntime.ttf");
-                if (_labelFont == null)
-                {
-                    _labelFont = Resources.GetBuiltinResource<Font>("Arial.ttf");
-                }
+                _labelFont = ResolveLabelFont();
             }
 
             GameObject textObject = new GameObject("Label", typeof(RectTransform), typeof(Text));
