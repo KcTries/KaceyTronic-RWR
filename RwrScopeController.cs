@@ -161,6 +161,8 @@ namespace TraditionalRWR
                         EnsureMissileWarningSubscribed();
                         UpdateContacts();
                         UpdateArhMissileContacts();
+                        UpdateWarningPanel();
+                        UpdateRank0CornerIndicators();
                         UpdateRank4NotchLines();
                         CleanupStaleIrMissiles();
                         UpdateIrWarningRing(_rank0IrArcImages, 0, ref _rank0IrRingVisible);
@@ -170,6 +172,7 @@ namespace TraditionalRWR
                         UpdateSplashScreen();
                         UpdateThemedStaticElements();
                         UpdateScopePosition();
+                        UpdateWarningPanelPosition();
                         return;
                     }
                 }
@@ -225,6 +228,20 @@ namespace TraditionalRWR
         // flash reads, so this also rides along with Funny Mode's rainbow
         // cycling like everything else that reads it does.
         private static Color IrWarningColor => WithOpacity(new Color(ThreatFlashColor.r, ThreatFlashColor.g, ThreatFlashColor.b, 0.95f));
+
+        // Rank 0 corner lamps -- inset well clear of the background's own
+        // rounded corners (18f radius) so they read as sitting neatly in
+        // the corner rather than overlapping the curve.
+        private const float Rank0IndicatorDiameter = 28f;
+        private const float Rank0IndicatorThickness = 2f;
+        private const float Rank0IndicatorInset = 28f;
+        private const float Rank0IndicatorCornerOffset = (PanelSize / 2f) - Rank0IndicatorInset;
+        // A/I and NVL only -- a fixed 3-second hold per ping (passed
+        // explicitly to Rank0IndicatorColor()). R9/T9 pass 0f instead, since
+        // they track a live SARH-threat state rather than a discrete ping.
+        private const float Rank0IndicatorPingHoldSeconds = 3f;
+        private const float Rank0IndicatorFadeSeconds = 1f;
+        private static Color Rank0IndicatorActiveColor => Themed(0.9f);
 
         // Rank 4: dotted line from center to the ring, plus a small bar at
         // the ring, toward anything locking the player or any inbound
@@ -366,6 +383,27 @@ namespace TraditionalRWR
         private Image _rank0HalfRingImage;
         private Image _rank0CrossHorizontalImage;
         private Image _rank0CrossVerticalImage;
+
+        // Rank 0 only: four small "old style" round lamps in the panel's
+        // corners -- A/I (Air Intercept, any aircraft ping), NVL (Naval,
+        // any ship ping), R9 (either radar truck or the mobile radar
+        // container), T9 (RadarSAM1/Boltstrike). Independent of the
+        // TGT/MSL/SEEN/HI-LO warning panel -- own placement, own trigger
+        // logic, own theme-colored (not threat-colored) look. Black by
+        // default; each just tracks its own LastPing time and derives its
+        // current color from that every frame (see UpdateRank0CornerIndicators()).
+        private Image _airInterceptBorder;
+        private Text _airInterceptLabel;
+        private float _airInterceptLastPing = float.NegativeInfinity;
+        private Image _navalBorder;
+        private Text _navalLabel;
+        private float _navalLastPing = float.NegativeInfinity;
+        private Image _radarTruckBorder;
+        private Text _radarTruckLabel;
+        private float _radarTruckLastPing = float.NegativeInfinity;
+        private Image _boltstrikeBorder;
+        private Text _boltstrikeLabel;
+        private float _boltstrikeLastPing = float.NegativeInfinity;
         // One shared arc sprite per ring (spans division 0's own slice),
         // reused across all instances of that ring via rotation -- same
         // sprite-reuse reasoning as the other cached shapes further down.
@@ -398,6 +436,70 @@ namespace TraditionalRWR
         private bool _splashActive;
         private float _splashStartTime;
 
+        // Separate small panel, same width as the scope, with four
+        // annunciator-style lights: TGT (someone's radar has you as its
+        // specific target), MSL (an actual missile threat -- SARH guidance
+        // or an ARH seeker's own radar ping), SEEN (a radar ping detected
+        // you at all, mirroring the minimap's grey/yellow/red ping colors),
+        // and a HI/LO split box (whether the current priority contact is
+        // above or below the player). Built and positioned independently of
+        // _scopeRoot so it can be repositioned on its own. No fill on any
+        // of them -- just a border+text pair, transparent interior so the
+        // panel background shows through.
+        private RectTransform _warningPanelRoot;
+        private Image _warningPanelBackground;
+        private Image _tgtLightBorder;
+        private Text _tgtLightLabel;
+        private Image _mslLightBorder;
+        private Text _mslLightLabel;
+        private Image _seenLightBorder;
+        private Text _seenLightLabel;
+        // Diagonal divider is a separate, always-idle-colored static
+        // element (like a fixed reticle) -- HI and LO each get their own
+        // independently-colorable L-shaped border piece instead, so they
+        // can light up individually without fighting over a shared frame.
+        private Image _hiLoDiagonal;
+        private Image _hiBorder;
+        private Text _hiLabel;
+        private Image _loBorder;
+        private Text _loLabel;
+        // Set alongside the priority diamond in UpdatePriorityDiamond() --
+        // the HI/LO indicator needs the actual Unit (for its world
+        // position), not just the TrackedContact the diamond itself uses.
+        private Unit _priorityEmitter;
+
+        // One-shot boot self-test, independent of the scope's own splash
+        // (own timing, not tied to SplashDisplaySeconds) -- retriggered
+        // every respawn from EnsureSubscribed(), same as ShowSplashScreen().
+        // All lights sit off (black), then each one is tested in turn (panel
+        // reading order: TGT, MSL, SEEN, HI/LO together) by stepping through
+        // every color it can actually display, ending back on off -- lights
+        // not yet reached and lights already done both just sit off, so at
+        // most one light shows a non-off color at any given moment.
+        private enum WarningPanelStartupPhase { Black, TestingTgt, TestingMsl, TestingSeen, TestingHiLo, Done }
+        private WarningPanelStartupPhase _startupPhase = WarningPanelStartupPhase.Done;
+        private float _startupPhaseStartTime;
+        private const float StartupBlackSeconds = 0.5f;
+        private const float StartupColorStepSeconds = 0.35f;
+
+        // TGT and SEEN are one-shot "spike" alerts rather than plain state
+        // lights: triggered directly from OnRadarWarningReceived every time
+        // a relevant ping arrives (see TriggerSpike()), not from a polled
+        // state transition -- so there's no "cooldown" to wait out, a fresh
+        // ping restarts the flash from scratch even mid-animation. Each
+        // flashes theme/threat color a few times, holds solid threat color,
+        // then hard-cuts back to the idle theme-colored look. Identical
+        // shape for both, just a different active color and trigger
+        // condition, so the state machine itself is shared.
+        private enum SpikeLightPhase { Idle, Flashing, Holding }
+        private struct SpikeLightState
+        {
+            public SpikeLightPhase Phase;
+            public float PhaseStartTime;
+        }
+        private SpikeLightState _tgtLightState;
+        private SpikeLightState _seenLightState;
+
         private void BuildScope(Transform canvasTransform)
         {
             // Every ring/reticle/tick/diamond built below bakes in a color
@@ -411,6 +513,7 @@ namespace TraditionalRWR
 
             _scopeRoot = BuildScopeRoot(canvasTransform);
             BuildBackground(_scopeRoot);
+            BuildWarningPanel(canvasTransform);
 
             _normalOverlayRoot = BuildOverlayRoot(_scopeRoot, "NormalOverlay");
             _normalRingImage = BuildRing(_normalOverlayRoot, NormalRingThickness);
@@ -424,6 +527,7 @@ namespace TraditionalRWR
             _rank0HalfRingImage = BuildHalfRangeRing(_rank0InnerElements, Rank0RingThickness);
             (_rank0CrossHorizontalImage, _rank0CrossVerticalImage) = BuildFullCross(_rank0InnerElements);
             BuildIrWarningRing(_rank0OverlayRoot, ref _rank0IrArcSprite, _rank0IrArcImages, "Rank0IrArc");
+            BuildRank0CornerIndicators(_rank0OverlayRoot);
 
             _rank2TicksOverlayRoot = BuildOverlayRoot(_scopeRoot, "Rank2TicksOverlay");
             BuildRank2Ticks(_rank2TicksOverlayRoot);
@@ -559,6 +663,25 @@ namespace TraditionalRWR
             }
             // Not colored here -- UpdatePriorityDiamond() now sets its color
             // every frame to match whatever contact it's currently over.
+            if (_warningPanelBackground != null)
+            {
+                _warningPanelBackground.color = WithOpacity(BackgroundBaseColor);
+            }
+            // The HI/LO diagonal divider is never touched elsewhere -- it
+            // has no active/inactive state of its own (that's on the HI/LO
+            // borders+labels individually), so it just sits at the idle
+            // look permanently and only needs live theme/opacity sync.
+            if (_hiLoDiagonal != null)
+            {
+                _hiLoDiagonal.color = WarningLightIdleColor;
+            }
+            // TGT/MSL/SEEN border+text and HI/LO border+label colors are
+            // not re-tinted here -- UpdateWarningPanel() (via
+            // UpdateSpikeLight()/UpdateHiLoIndicator()/ApplyLightColor())
+            // already recomputes them every frame from live state, and runs
+            // earlier in Update() than this method -- touching them here
+            // too would stomp that frame's animated color right back to a
+            // static one.
         }
 
         private void BuildSplashScreen(RectTransform parent)
@@ -802,6 +925,17 @@ namespace TraditionalRWR
         public static float ScopePositionX = 0f;
         public static float ScopePositionY = 446f;
 
+        // Set from Plugin.Awake() ("Warning Panel Position" section) and
+        // live-updated via UpdateWarningPanelPosition(). Defaults stack the
+        // panel directly above the scope (ScopePositionY's default +
+        // PanelSize + a small gap).
+        public static float WarningPanelPositionX = 0f;
+        public static float WarningPanelPositionY = 716f;
+
+        // Set from Plugin.Awake() ("General" section), live-updated in
+        // ConfigManager. Panel is always built; this just toggles it active.
+        public static bool ExtraPanelEnabled = true;
+
         private RectTransform BuildScopeRoot(Transform parent)
         {
             GameObject rootObject = new GameObject("ScopeRoot", typeof(RectTransform));
@@ -820,6 +954,30 @@ namespace TraditionalRWR
             return rect;
         }
 
+        // Shared by every panel's own position-update method so Dealer Mode
+        // (Secrets, see Plugin.cs) bounces all of them in sync rather than
+        // just the scope -- both panels are the same width (PanelSize) and
+        // share the bottom-left pivot convention, so the same scale/
+        // X-compensation applies unchanged to each.
+        private static void ComputeDealerModeSquish(out float scaleX, out float scaleY)
+        {
+            scaleX = 1f;
+            scaleY = 1f;
+            if (!DealerModeEnabled)
+            {
+                return;
+            }
+
+            // One full squish-and-release cycle per beat. Cosine-based so
+            // it starts and ends each cycle at squishT=0 (full height)
+            // rather than jumping straight into the squish.
+            float bounceHz = DealerModeBpm / 60f;
+            float squishT = (1f - Mathf.Cos(Time.unscaledTime * bounceHz * 2f * Mathf.PI)) / 2f;
+
+            scaleY = Mathf.Lerp(1f, DealerModeMinScaleY, squishT);
+            scaleX = Mathf.Lerp(1f, DealerModeMaxScaleX, squishT);
+        }
+
         private void UpdateScopePosition()
         {
             if (_scopeRoot == null)
@@ -827,32 +985,464 @@ namespace TraditionalRWR
                 return;
             }
 
-            float scaleX = 1f;
-            float scaleY = 1f;
-            float compensatedX = ScopePositionX;
+            ComputeDealerModeSquish(out float scaleX, out float scaleY);
 
-            if (DealerModeEnabled)
-            {
-                // One full squish-and-release cycle per beat. Cosine-based
-                // so it starts and ends each cycle at squishT=0 (full
-                // height) rather than jumping straight into the squish.
-                float bounceHz = DealerModeBpm / 60f;
-                float squishT = (1f - Mathf.Cos(Time.unscaledTime * bounceHz * 2f * Mathf.PI)) / 2f;
-
-                scaleY = Mathf.Lerp(1f, DealerModeMinScaleY, squishT);
-                scaleX = Mathf.Lerp(1f, DealerModeMaxScaleX, squishT);
-
-                // _scopeRoot's pivot is bottom-left (see BuildScopeRoot), so
-                // scaling Y already keeps the bottom edge fixed for free --
-                // only the top comes down. X needs a compensating shift,
-                // though, or widening would only grow the panel rightward
-                // off the left edge instead of bulging out symmetrically
-                // around its horizontal center.
-                compensatedX = ScopePositionX + (PanelSize / 2f) * (1f - scaleX);
-            }
+            // _scopeRoot's pivot is bottom-left (see BuildScopeRoot), so
+            // scaling Y already keeps the bottom edge fixed for free --
+            // only the top comes down. X needs a compensating shift,
+            // though (zero when Dealer Mode is off, since scaleX is then
+            // exactly 1), or widening would only grow the panel rightward
+            // off the left edge instead of bulging out symmetrically
+            // around its horizontal center.
+            float compensatedX = ScopePositionX + (PanelSize / 2f) * (1f - scaleX);
 
             _scopeRoot.anchoredPosition = new Vector2(compensatedX, ScopePositionY);
             _scopeRoot.localScale = new Vector3(scaleX, scaleY, 1f);
+        }
+
+        private const float WarningPanelHeight = 110f;
+        private const float WarningLightWidth = 90f;
+        private const float WarningLightHeight = 42f;
+        private const float WarningLightGap = 6f;
+        private const float WarningLightCornerRadius = 4f;
+        private const float WarningLightBorderThickness = 2f;
+        private const float WarningLightInsetX = 16f;
+        // Left pair (TGT/MSL) stacked and vertically centered against the
+        // left edge; right pair (SEEN/HI-LO) mirrors the same inset against
+        // the right edge instead.
+        private const float WarningLightOffsetX = -(PanelSize / 2f) + WarningLightInsetX + (WarningLightWidth / 2f);
+        private const float WarningLightOffsetY = (WarningLightGap / 2f) + (WarningLightHeight / 2f);
+        private const float WarningLightRightOffsetX = -WarningLightOffsetX;
+
+        // Resting/inactive look for every indicator's border+text -- fully
+        // off (black) rather than dimly lit, so a light only ever shows
+        // color while its own event is actually firing.
+        private static Color WarningLightOffColor => WithOpacity(Color.black);
+        // Theme color, used only by the HI/LO diagonal divider -- that's a
+        // static structural element (like the panel background), not an
+        // indicator with its own on/off state, so it keeps the old dim
+        // theme-colored look instead of going black with the rest.
+        private static Color WarningLightIdleColor => Themed(0.7f);
+        // SEEN's active color -- same shape as TargetedColor, but off
+        // Threat Secondary instead of Threat Primary.
+        private static Color SeenColor => WithOpacity(new Color(ThreatFlashColor.r, ThreatFlashColor.g, ThreatFlashColor.b, 0.95f));
+
+        private const float TgtFlashInterval = 0.15f;
+        private const int TgtFlashCount = 3;
+        // Solid hold after the flashes finish, then a hard cut (no fade)
+        // straight back to WarningLightOffColor.
+        private const float TgtHoldSeconds = 3.5f;
+        // SEEN's hold is refreshed rather than restarted by pings that
+        // arrive mid-hold -- see TriggerSeenPing().
+        private const float SeenHoldSeconds = 5f;
+
+        private const float HiLoDiagonalThickness = 2f;
+        // How far each border half pulls back from the diagonal centerline
+        // -- see CreateHiLoBorderHalfSprite.
+        private const float HiLoGapMargin = 3f;
+        // Quarter-offset into each triangular half so the label sits
+        // roughly centered in its own half rather than the shared box center.
+        private const float HiLoLabelOffsetX = WarningLightWidth / 4f;
+        private const float HiLoLabelOffsetY = WarningLightHeight / 4f;
+
+        private void BuildWarningPanel(Transform canvasTransform)
+        {
+            GameObject rootObject = new GameObject("WarningPanelRoot", typeof(RectTransform));
+            RectTransform rect = rootObject.GetComponent<RectTransform>();
+            rect.SetParent(canvasTransform, false);
+            rect.anchorMin = Vector2.zero;
+            rect.anchorMax = Vector2.zero;
+            rect.pivot = Vector2.zero;
+            rect.sizeDelta = new Vector2(PanelSize, WarningPanelHeight);
+            rect.anchoredPosition = new Vector2(WarningPanelPositionX, WarningPanelPositionY);
+            _warningPanelRoot = rect;
+
+            GameObject backgroundObject = new GameObject("Background", typeof(RectTransform), typeof(Image));
+            RectTransform backgroundRect = backgroundObject.GetComponent<RectTransform>();
+            backgroundRect.SetParent(_warningPanelRoot, false);
+            backgroundRect.anchorMin = Vector2.zero;
+            backgroundRect.anchorMax = Vector2.one;
+            backgroundRect.offsetMin = Vector2.zero;
+            backgroundRect.offsetMax = Vector2.zero;
+            _warningPanelBackground = backgroundObject.GetComponent<Image>();
+            _warningPanelBackground.sprite = CreateRoundedRectSprite(PanelSize, Mathf.RoundToInt(WarningPanelHeight), 18f, Color.white);
+            _warningPanelBackground.color = WithOpacity(BackgroundBaseColor);
+            _warningPanelBackground.raycastTarget = false;
+
+            (_tgtLightBorder, _tgtLightLabel) = BuildWarningLight(_warningPanelRoot, "TGT", new Vector2(WarningLightOffsetX, WarningLightOffsetY));
+            (_mslLightBorder, _mslLightLabel) = BuildWarningLight(_warningPanelRoot, "MSL", new Vector2(WarningLightOffsetX, -WarningLightOffsetY));
+            (_seenLightBorder, _seenLightLabel) = BuildWarningLight(_warningPanelRoot, "SEEN", new Vector2(WarningLightRightOffsetX, WarningLightOffsetY));
+            BuildHiLoIndicator(_warningPanelRoot, new Vector2(WarningLightRightOffsetX, -WarningLightOffsetY));
+        }
+
+        private void BuildHiLoIndicator(RectTransform parent, Vector2 position)
+        {
+            GameObject diagonalObject = new GameObject("HiLoDiagonal", typeof(RectTransform), typeof(Image));
+            RectTransform diagonalRect = diagonalObject.GetComponent<RectTransform>();
+            diagonalRect.SetParent(parent, false);
+            diagonalRect.anchorMin = new Vector2(0.5f, 0.5f);
+            diagonalRect.anchorMax = new Vector2(0.5f, 0.5f);
+            diagonalRect.pivot = new Vector2(0.5f, 0.5f);
+            diagonalRect.sizeDelta = new Vector2(WarningLightWidth, WarningLightHeight);
+            diagonalRect.anchoredPosition = position;
+            _hiLoDiagonal = diagonalObject.GetComponent<Image>();
+            _hiLoDiagonal.sprite = CreateHiLoDiagonalSprite(Mathf.RoundToInt(WarningLightWidth), Mathf.RoundToInt(WarningLightHeight), HiLoDiagonalThickness);
+            _hiLoDiagonal.color = WarningLightIdleColor;
+            _hiLoDiagonal.raycastTarget = false;
+
+            // Diagonal runs top-left to bottom-right, splitting the box
+            // into a top-right triangle (HI) and bottom-left triangle (LO)
+            // -- each half gets its own border piece (see
+            // CreateHiLoBorderHalfSprite) so it can light up independently,
+            // and its label nudged well clear of the diagonal into its half.
+            _hiBorder = BuildHiLoBorderHalf(parent, "HiBorder", position, upperRightHalf: true);
+            _loBorder = BuildHiLoBorderHalf(parent, "LoBorder", position, upperRightHalf: false);
+
+            _hiLabel = CreateLabel(parent, "HI", position + new Vector2(HiLoLabelOffsetX, HiLoLabelOffsetY), 14, WarningLightOffColor, FontStyle.Bold, WarningLightWidth / 2f, WarningLightHeight / 2f);
+            _loLabel = CreateLabel(parent, "LO", position + new Vector2(-HiLoLabelOffsetX, -HiLoLabelOffsetY), 14, WarningLightOffColor, FontStyle.Bold, WarningLightWidth / 2f, WarningLightHeight / 2f);
+        }
+
+        private Image BuildHiLoBorderHalf(RectTransform parent, string name, Vector2 position, bool upperRightHalf)
+        {
+            GameObject borderObject = new GameObject(name, typeof(RectTransform), typeof(Image));
+            RectTransform borderRect = borderObject.GetComponent<RectTransform>();
+            borderRect.SetParent(parent, false);
+            borderRect.anchorMin = new Vector2(0.5f, 0.5f);
+            borderRect.anchorMax = new Vector2(0.5f, 0.5f);
+            borderRect.pivot = new Vector2(0.5f, 0.5f);
+            borderRect.sizeDelta = new Vector2(WarningLightWidth, WarningLightHeight);
+            borderRect.anchoredPosition = position;
+            Image borderImage = borderObject.GetComponent<Image>();
+            borderImage.sprite = CreateHiLoBorderHalfSprite(Mathf.RoundToInt(WarningLightWidth), Mathf.RoundToInt(WarningLightHeight), WarningLightCornerRadius, WarningLightBorderThickness, upperRightHalf);
+            borderImage.color = WarningLightOffColor;
+            borderImage.raycastTarget = false;
+            return borderImage;
+        }
+
+        private (Image border, Text label) BuildWarningLight(RectTransform parent, string text, Vector2 position)
+        {
+            GameObject borderObject = new GameObject(text + "Border", typeof(RectTransform), typeof(Image));
+            RectTransform borderRect = borderObject.GetComponent<RectTransform>();
+            borderRect.SetParent(parent, false);
+            borderRect.anchorMin = new Vector2(0.5f, 0.5f);
+            borderRect.anchorMax = new Vector2(0.5f, 0.5f);
+            borderRect.pivot = new Vector2(0.5f, 0.5f);
+            borderRect.sizeDelta = new Vector2(WarningLightWidth, WarningLightHeight);
+            borderRect.anchoredPosition = position;
+            Image borderImage = borderObject.GetComponent<Image>();
+            borderImage.sprite = CreateRectFrameSprite(Mathf.RoundToInt(WarningLightWidth), Mathf.RoundToInt(WarningLightHeight), WarningLightCornerRadius, WarningLightBorderThickness);
+            borderImage.color = WarningLightOffColor;
+            borderImage.raycastTarget = false;
+
+            Text label = CreateLabel(parent, text, position, 20, WarningLightOffColor, FontStyle.Bold, WarningLightWidth, WarningLightHeight);
+
+            return (borderImage, label);
+        }
+
+        private void UpdateWarningPanelPosition()
+        {
+            if (_warningPanelRoot == null)
+            {
+                return;
+            }
+
+            ComputeDealerModeSquish(out float scaleX, out float scaleY);
+            float compensatedX = WarningPanelPositionX + (PanelSize / 2f) * (1f - scaleX);
+
+            _warningPanelRoot.anchoredPosition = new Vector2(compensatedX, WarningPanelPositionY);
+            _warningPanelRoot.localScale = new Vector3(scaleX, scaleY, 1f);
+        }
+
+        private void StartWarningPanelStartupSequence()
+        {
+            _startupPhase = WarningPanelStartupPhase.Black;
+            _startupPhaseStartTime = Time.unscaledTime;
+        }
+
+        // Picks the color for whichever step `elapsedInPhase` currently
+        // falls in, holding on the last step once the phase's own elapsed
+        // check (in UpdateWarningPanelStartup()) is about to advance it.
+        private static Color StartupStepColor(float elapsedInPhase, Color[] steps)
+        {
+            int index = Mathf.Clamp(Mathf.FloorToInt(elapsedInPhase / StartupColorStepSeconds), 0, steps.Length - 1);
+            return steps[index];
+        }
+
+        // Returns true while the startup sequence owns the panel's colors
+        // this frame (caller should skip its own normal-state logic), false
+        // once it's finished and normal per-light logic should resume.
+        private bool UpdateWarningPanelStartup()
+        {
+            if (_startupPhase == WarningPanelStartupPhase.Done)
+            {
+                return false;
+            }
+
+            float elapsed = Time.unscaledTime - _startupPhaseStartTime;
+
+            switch (_startupPhase)
+            {
+                case WarningPanelStartupPhase.Black:
+                    ApplyLightColor(_tgtLightBorder, _tgtLightLabel, WarningLightOffColor);
+                    ApplyLightColor(_mslLightBorder, _mslLightLabel, WarningLightOffColor);
+                    ApplyLightColor(_seenLightBorder, _seenLightLabel, WarningLightOffColor);
+                    ApplyLightColor(_hiBorder, _hiLabel, WarningLightOffColor);
+                    ApplyLightColor(_loBorder, _loLabel, WarningLightOffColor);
+                    if (elapsed >= StartupBlackSeconds)
+                    {
+                        _startupPhase = WarningPanelStartupPhase.TestingTgt;
+                        _startupPhaseStartTime = Time.unscaledTime;
+                    }
+                    break;
+
+                case WarningPanelStartupPhase.TestingTgt:
+                {
+                    Color[] steps = { TargetedColor, WarningLightOffColor };
+                    ApplyLightColor(_tgtLightBorder, _tgtLightLabel, StartupStepColor(elapsed, steps));
+                    ApplyLightColor(_mslLightBorder, _mslLightLabel, WarningLightOffColor);
+                    ApplyLightColor(_seenLightBorder, _seenLightLabel, WarningLightOffColor);
+                    ApplyLightColor(_hiBorder, _hiLabel, WarningLightOffColor);
+                    ApplyLightColor(_loBorder, _loLabel, WarningLightOffColor);
+                    if (elapsed >= steps.Length * StartupColorStepSeconds)
+                    {
+                        _startupPhase = WarningPanelStartupPhase.TestingMsl;
+                        _startupPhaseStartTime = Time.unscaledTime;
+                    }
+                    break;
+                }
+
+                case WarningPanelStartupPhase.TestingMsl:
+                {
+                    Color[] steps = { TargetedColor, SeenColor, WarningLightOffColor };
+                    ApplyLightColor(_tgtLightBorder, _tgtLightLabel, WarningLightOffColor);
+                    ApplyLightColor(_mslLightBorder, _mslLightLabel, StartupStepColor(elapsed, steps));
+                    ApplyLightColor(_seenLightBorder, _seenLightLabel, WarningLightOffColor);
+                    ApplyLightColor(_hiBorder, _hiLabel, WarningLightOffColor);
+                    ApplyLightColor(_loBorder, _loLabel, WarningLightOffColor);
+                    if (elapsed >= steps.Length * StartupColorStepSeconds)
+                    {
+                        _startupPhase = WarningPanelStartupPhase.TestingSeen;
+                        _startupPhaseStartTime = Time.unscaledTime;
+                    }
+                    break;
+                }
+
+                case WarningPanelStartupPhase.TestingSeen:
+                {
+                    Color[] steps = { SeenColor, WarningLightOffColor };
+                    ApplyLightColor(_tgtLightBorder, _tgtLightLabel, WarningLightOffColor);
+                    ApplyLightColor(_mslLightBorder, _mslLightLabel, WarningLightOffColor);
+                    ApplyLightColor(_seenLightBorder, _seenLightLabel, StartupStepColor(elapsed, steps));
+                    ApplyLightColor(_hiBorder, _hiLabel, WarningLightOffColor);
+                    ApplyLightColor(_loBorder, _loLabel, WarningLightOffColor);
+                    if (elapsed >= steps.Length * StartupColorStepSeconds)
+                    {
+                        _startupPhase = WarningPanelStartupPhase.TestingHiLo;
+                        _startupPhaseStartTime = Time.unscaledTime;
+                    }
+                    break;
+                }
+
+                case WarningPanelStartupPhase.TestingHiLo:
+                {
+                    Color[] steps = { TargetedColor, WarningLightOffColor };
+                    Color hiLoColor = StartupStepColor(elapsed, steps);
+                    ApplyLightColor(_tgtLightBorder, _tgtLightLabel, WarningLightOffColor);
+                    ApplyLightColor(_mslLightBorder, _mslLightLabel, WarningLightOffColor);
+                    ApplyLightColor(_seenLightBorder, _seenLightLabel, WarningLightOffColor);
+                    ApplyLightColor(_hiBorder, _hiLabel, hiLoColor);
+                    ApplyLightColor(_loBorder, _loLabel, hiLoColor);
+                    if (elapsed >= steps.Length * StartupColorStepSeconds)
+                    {
+                        _startupPhase = WarningPanelStartupPhase.Done;
+                    }
+                    break;
+                }
+            }
+
+            return true;
+        }
+
+        // TGT: any current radar contact has the player specifically
+        // targeted (the exact same signal that turns that contact's icon
+        // TargetedColor on the scope) -- drives the TGT spike. SEEN: any
+        // radar ping detected the player at all (mirrors the minimap's
+        // grey/yellow/red ping coloring -- see OnRadarWarningReceived).
+        // MSL: an actual missile threat is in effect -- a SARH launcher
+        // actively guiding one (_sarhThreatCounts) or an ARH missile's own
+        // seeker radar currently pinging (_arhMissileContacts, already
+        // pruned to non-stale entries by UpdateArhMissileContacts() earlier
+        // this same frame). HI/LO: whether the current priority contact
+        // (see UpdatePriorityDiamond(), which sets _priorityEmitter) sits
+        // above or below the player. All four go dark during the splash,
+        // same as every other live overlay -- spike states are forced back
+        // to Idle rather than left running so they don't silently keep
+        // counting down underneath it.
+        private void UpdateWarningPanel()
+        {
+            if (_warningPanelRoot == null)
+            {
+                return;
+            }
+
+            _warningPanelRoot.gameObject.SetActive(ExtraPanelEnabled);
+            if (!ExtraPanelEnabled)
+            {
+                return;
+            }
+
+            // A genuine targeting lock or missile threat firing mid-animation
+            // takes priority over the cosmetic boot sequence -- the trigger
+            // methods set _tgtLightState/_sarhThreatCounts/etc. unconditionally
+            // regardless of startup state, but nothing advances or displays
+            // that state until the startup sequence actually finishes, so
+            // without this check a threat that appears during the first
+            // ~3.65s after respawn would go unseen until it's already stale.
+            // Deliberately scoped to TGT/MSL only (not SEEN or HI/LO, which
+            // fire on routine radar activity / any nearby contact) -- those
+            // are common enough in a populated mission that including them
+            // would abort the animation almost every single respawn.
+            if (_startupPhase != WarningPanelStartupPhase.Done
+                && (_tgtLightState.Phase != SpikeLightPhase.Idle || _sarhThreatCounts.Count > 0 || _arhMissileContacts.Count > 0))
+            {
+                _startupPhase = WarningPanelStartupPhase.Done;
+            }
+
+            if (UpdateWarningPanelStartup())
+            {
+                return;
+            }
+
+            if (_splashActive)
+            {
+                _tgtLightState.Phase = SpikeLightPhase.Idle;
+                _seenLightState.Phase = SpikeLightPhase.Idle;
+                ApplyLightColor(_tgtLightBorder, _tgtLightLabel, WarningLightOffColor);
+                ApplyLightColor(_mslLightBorder, _mslLightLabel, WarningLightOffColor);
+                ApplyLightColor(_seenLightBorder, _seenLightLabel, WarningLightOffColor);
+                ApplyLightColor(_hiBorder, _hiLabel, WarningLightOffColor);
+                ApplyLightColor(_loBorder, _loLabel, WarningLightOffColor);
+                return;
+            }
+
+            ApplyLightColor(_tgtLightBorder, _tgtLightLabel, UpdateSpikeLight(ref _tgtLightState, TargetedColor, TgtHoldSeconds));
+            ApplyLightColor(_seenLightBorder, _seenLightLabel, UpdateSpikeLight(ref _seenLightState, SeenColor, SeenHoldSeconds));
+
+            bool missileThreat = _sarhThreatCounts.Count > 0 || _arhMissileContacts.Count > 0;
+            Color mslColor;
+            if (missileThreat)
+            {
+                bool useColorA = Mathf.Repeat(Time.unscaledTime, SarhFlashInterval * 2f) < SarhFlashInterval;
+                mslColor = useColorA ? SarhFlashColorA : SarhFlashColorB;
+            }
+            else
+            {
+                mslColor = WarningLightOffColor;
+            }
+            ApplyLightColor(_mslLightBorder, _mslLightLabel, mslColor);
+
+            UpdateHiLoIndicator();
+        }
+
+        private void UpdateHiLoIndicator()
+        {
+            bool priorityAbove = false;
+            bool priorityBelow = false;
+            if (_priorityEmitter != null && _playerAircraft != null)
+            {
+                float deltaY = _priorityEmitter.transform.position.y - _playerAircraft.transform.position.y;
+                priorityAbove = deltaY > 0f;
+                priorityBelow = deltaY < 0f;
+            }
+
+            ApplyLightColor(_hiBorder, _hiLabel, priorityAbove ? TargetedColor : WarningLightOffColor);
+            ApplyLightColor(_loBorder, _loLabel, priorityBelow ? TargetedColor : WarningLightOffColor);
+        }
+
+        // Called directly from OnRadarWarningReceived on every ping that
+        // targets the player. Unconditionally restarts the flash phase,
+        // even mid-animation, so there's no "cooldown" gap needed before it
+        // can trigger again.
+        private static void TriggerSpike(ref SpikeLightState state)
+        {
+            state.Phase = SpikeLightPhase.Flashing;
+            state.PhaseStartTime = Time.unscaledTime;
+        }
+
+        // Called directly from OnRadarWarningReceived on every ping that
+        // detects the player at all. Unlike TriggerSpike(), a ping doesn't
+        // unconditionally restart the flash: from Idle it starts the flash
+        // like normal, but a ping arriving mid-hold just refreshes the hold
+        // timer (extending how long it stays lit) instead of replaying the
+        // flash from scratch. A ping arriving mid-flash is left alone --
+        // the in-progress flash just runs out into Holding on its own.
+        private static void TriggerSeenPing(ref SpikeLightState state)
+        {
+            if (state.Phase == SpikeLightPhase.Idle)
+            {
+                state.Phase = SpikeLightPhase.Flashing;
+                state.PhaseStartTime = Time.unscaledTime;
+            }
+            else if (state.Phase == SpikeLightPhase.Holding)
+            {
+                state.PhaseStartTime = Time.unscaledTime;
+            }
+        }
+
+        // Just phase progression + color output -- triggering itself
+        // happens in TriggerSpike()/TriggerSeenPing(), called from
+        // OnRadarWarningReceived.
+        private static Color UpdateSpikeLight(ref SpikeLightState state, Color activeColor, float holdSeconds)
+        {
+            float now = Time.unscaledTime;
+
+            Color color;
+            switch (state.Phase)
+            {
+                case SpikeLightPhase.Flashing:
+                {
+                    float elapsed = now - state.PhaseStartTime;
+                    float flashDuration = TgtFlashCount * TgtFlashInterval * 2f;
+                    if (elapsed >= flashDuration)
+                    {
+                        state.Phase = SpikeLightPhase.Holding;
+                        state.PhaseStartTime = now;
+                        color = activeColor;
+                    }
+                    else
+                    {
+                        bool onHalf = Mathf.Repeat(elapsed, TgtFlashInterval * 2f) < TgtFlashInterval;
+                        color = onHalf ? activeColor : WarningLightOffColor;
+                    }
+                    break;
+                }
+                case SpikeLightPhase.Holding:
+                {
+                    if (now - state.PhaseStartTime >= holdSeconds)
+                    {
+                        state.Phase = SpikeLightPhase.Idle;
+                    }
+                    color = activeColor;
+                    break;
+                }
+                default:
+                    color = WarningLightOffColor;
+                    break;
+            }
+
+            return color;
+        }
+
+        private static void ApplyLightColor(Image border, Text label, Color color)
+        {
+            if (border != null)
+            {
+                border.color = color;
+            }
+            if (label != null)
+            {
+                label.color = color;
+            }
         }
 
         private Image BuildRing(RectTransform parent, float thickness)
@@ -970,6 +1560,35 @@ namespace TraditionalRWR
 
                 arcImages[division] = image;
             }
+        }
+
+        private void BuildRank0CornerIndicators(RectTransform parent)
+        {
+            float corner = Rank0IndicatorCornerOffset;
+            (_airInterceptBorder, _airInterceptLabel) = BuildRank0CornerIndicator(parent, "A/I", new Vector2(-corner, corner));
+            (_navalBorder, _navalLabel) = BuildRank0CornerIndicator(parent, "NVL", new Vector2(corner, corner));
+            (_radarTruckBorder, _radarTruckLabel) = BuildRank0CornerIndicator(parent, "R9", new Vector2(-corner, -corner));
+            (_boltstrikeBorder, _boltstrikeLabel) = BuildRank0CornerIndicator(parent, "T9", new Vector2(corner, -corner));
+        }
+
+        private (Image border, Text label) BuildRank0CornerIndicator(RectTransform parent, string text, Vector2 position)
+        {
+            GameObject borderObject = new GameObject(text + "Indicator", typeof(RectTransform), typeof(Image));
+            RectTransform borderRect = borderObject.GetComponent<RectTransform>();
+            borderRect.SetParent(parent, false);
+            borderRect.anchorMin = new Vector2(0.5f, 0.5f);
+            borderRect.anchorMax = new Vector2(0.5f, 0.5f);
+            borderRect.pivot = new Vector2(0.5f, 0.5f);
+            borderRect.sizeDelta = new Vector2(Rank0IndicatorDiameter, Rank0IndicatorDiameter);
+            borderRect.anchoredPosition = position;
+            Image borderImage = borderObject.GetComponent<Image>();
+            borderImage.sprite = CreateRingSprite(Mathf.RoundToInt(Rank0IndicatorDiameter), Rank0IndicatorThickness);
+            borderImage.color = WarningLightOffColor;
+            borderImage.raycastTarget = false;
+
+            Text label = CreateLabel(parent, text, position, 9, WarningLightOffColor, FontStyle.Bold, Rank0IndicatorDiameter, Rank0IndicatorDiameter - 4f);
+
+            return (borderImage, label);
         }
 
         private Image CreateCrossBar(RectTransform parent, string name, Vector2 size)
@@ -1102,6 +1721,132 @@ namespace TraditionalRWR
 
                     float alpha = Mathf.Clamp01(0.5f - dist);
                     texture.SetPixel(x, y, new Color(fillColor.r, fillColor.g, fillColor.b, fillColor.a * alpha));
+                }
+            }
+
+            texture.Apply();
+            return Sprite.Create(texture, new Rect(0f, 0f, width, height), new Vector2(0.5f, 0.5f));
+        }
+
+        // Shared by CreateRectFrameSprite and CreateHiLoBorderHalfSprite --
+        // signed distance from (px, py) (pixel center relative to the box's
+        // own center) to a rounded rect's outline, converted to a border-band
+        // alpha. Kept as one function so a future tweak to the border
+        // formula/anti-aliasing can't update one call site and miss the other.
+        private static float RoundedRectBorderAlpha(float px, float py, float halfW, float halfH, float cornerRadius, float thickness)
+        {
+            float qx = Mathf.Abs(px) - (halfW - cornerRadius);
+            float qy = Mathf.Abs(py) - (halfH - cornerRadius);
+
+            float outsideDist = Mathf.Sqrt(Mathf.Pow(Mathf.Max(qx, 0f), 2f) + Mathf.Pow(Mathf.Max(qy, 0f), 2f));
+            float dist = outsideDist + Mathf.Min(Mathf.Max(qx, qy), 0f) - cornerRadius;
+
+            float band = Mathf.Abs(dist) - (thickness / 2f);
+            return Mathf.Clamp01(0.5f - band);
+        }
+
+        // Hollow rounded-rect outline -- same signed-distance shape as
+        // CreateRoundedRectSprite, but alpha comes from a band around the
+        // zero-distance contour (|dist| within half the border thickness)
+        // instead of "inside the shape", so only the border rasterizes.
+        private static Sprite CreateRectFrameSprite(int width, int height, float cornerRadius, float thickness)
+        {
+            Texture2D texture = new Texture2D(width, height, TextureFormat.RGBA32, false);
+            texture.wrapMode = TextureWrapMode.Clamp;
+
+            float halfW = width / 2f;
+            float halfH = height / 2f;
+
+            for (int y = 0; y < height; y++)
+            {
+                for (int x = 0; x < width; x++)
+                {
+                    float alpha = RoundedRectBorderAlpha((x + 0.5f) - halfW, (y + 0.5f) - halfH, halfW, halfH, cornerRadius, thickness);
+                    texture.SetPixel(x, y, new Color(1f, 1f, 1f, alpha));
+                }
+            }
+
+            texture.Apply();
+            return Sprite.Create(texture, new Rect(0f, 0f, width, height), new Vector2(0.5f, 0.5f));
+        }
+
+        // The HI/LO diagonal runs top-left to bottom-right ("\"), through
+        // origin point (0, height) with direction (width, -height) --
+        // splitting the box into a top-right triangle (containing corner
+        // (width, height)) and a bottom-left triangle (containing corner
+        // (0, 0)). The signed 2D cross product of a pixel's offset from
+        // that origin against the (normalized) diagonal direction is
+        // negative on the top-right side and positive on the bottom-left
+        // side (checked directly against both corners) -- both sprite
+        // generators below share that same sign convention so the two
+        // border halves and the label placement in BuildHiLoIndicator all
+        // agree on which side is which.
+        private static Vector2 HiLoDiagonalDirection(int width, int height)
+        {
+            return new Vector2(width, -height).normalized;
+        }
+
+        private static float HiLoSignedDiagonalDistance(float x, float y, int height, Vector2 diagonalDir)
+        {
+            float relX = x - 0f;
+            float relY = y - height;
+            return relX * diagonalDir.y - relY * diagonalDir.x;
+        }
+
+        // Deliberately hard-thresholded (no smoothing) and Point-filtered --
+        // every other sprite in this file uses a soft/anti-aliased edge,
+        // but that made this specific line read as blurry rather than
+        // crisp, so it gets the opposite (aliased) treatment instead.
+        private static Sprite CreateHiLoDiagonalSprite(int width, int height, float thickness)
+        {
+            Texture2D texture = new Texture2D(width, height, TextureFormat.RGBA32, false);
+            texture.filterMode = FilterMode.Point;
+            texture.wrapMode = TextureWrapMode.Clamp;
+            Vector2 diagonalDir = HiLoDiagonalDirection(width, height);
+
+            for (int y = 0; y < height; y++)
+            {
+                for (int x = 0; x < width; x++)
+                {
+                    float signedDist = HiLoSignedDiagonalDistance(x + 0.5f, y + 0.5f, height, diagonalDir);
+                    float alpha = Mathf.Abs(signedDist) <= thickness / 2f ? 1f : 0f;
+                    texture.SetPixel(x, y, new Color(1f, 1f, 1f, alpha));
+                }
+            }
+
+            texture.Apply();
+            return Sprite.Create(texture, new Rect(0f, 0f, width, height), new Vector2(0.5f, 0.5f));
+        }
+
+        // Same rounded-rect border shape as CreateRectFrameSprite, but only
+        // rasterized on whichever side of the diagonal this half owns, and
+        // pulled back an extra HiLoGapMargin from the centerline so the two
+        // halves don't touch -- the two halves' sprites still tile together
+        // into roughly the original combined outline, just with a visible
+        // gap along the shared diagonal edge instead of a seam. That edge
+        // itself is deliberately NOT included here at all (see
+        // CreateHiLoDiagonalSprite) so it stays a single neutral static
+        // element regardless of which half is currently lit.
+        private static Sprite CreateHiLoBorderHalfSprite(int width, int height, float cornerRadius, float thickness, bool upperRightHalf)
+        {
+            Texture2D texture = new Texture2D(width, height, TextureFormat.RGBA32, false);
+            texture.wrapMode = TextureWrapMode.Clamp;
+
+            float halfW = width / 2f;
+            float halfH = height / 2f;
+            Vector2 diagonalDir = HiLoDiagonalDirection(width, height);
+
+            for (int y = 0; y < height; y++)
+            {
+                for (int x = 0; x < width; x++)
+                {
+                    float borderAlpha = RoundedRectBorderAlpha((x + 0.5f) - halfW, (y + 0.5f) - halfH, halfW, halfH, cornerRadius, thickness);
+
+                    float signedDist = HiLoSignedDiagonalDistance(x + 0.5f, y + 0.5f, height, diagonalDir);
+                    bool included = upperRightHalf ? signedDist < -HiLoGapMargin : signedDist > HiLoGapMargin;
+
+                    float alpha = included ? borderAlpha : 0f;
+                    texture.SetPixel(x, y, new Color(1f, 1f, 1f, alpha));
                 }
             }
 
@@ -1297,6 +2042,19 @@ namespace TraditionalRWR
             { "P_Trisurface1", 3 },         // FS-3 Ternion
             { "Aryx_CargoPlane1", 3 },      // MC-260 Chimera
             { "Aryx_Interceptor1", 4 },     // FS-41 Eclipse
+
+            // Playable Ships addon -- makes ship classes flyable, so they're
+            // technically Aircraft here and need their own quality entries
+            // like any other aircraft. See ShipTypeOverrideJsonKeys below
+            // for the part that makes them still render/designate as ships.
+            { "SmallKarrier", 4 },          // Cursor-class equivalent
+            { "LandingKraft", 3 },          // no radar
+            { "PatrolBote", 3 },
+            { "Korvette1", 4 },             // Shard-class equivalent
+            { "Frickate1", 4 },             // Argus-class equivalent
+            { "Destroyer1_Player", 4 },     // Dynamo-class equivalent
+            { "AssaultKarrier", 4 },        // Annex-class equivalent
+            { "FleetKarrier", 4 },          // Hyperion-class equivalent
         };
 
         // These three airframes don't have a single fixed quality -- it's
@@ -1823,6 +2581,7 @@ namespace TraditionalRWR
             }
             ApplyOverlayVisibility();
             ShowSplashScreen();
+            StartWarningPanelStartupSequence();
 
             WriteDebug($"Subscribed to onRadarWarning for aircraft '{_playerAircraft.name}', RWR quality={_currentRwrQuality}.");
         }
@@ -1900,6 +2659,18 @@ namespace TraditionalRWR
             _rank0CrossVerticalImage = null;
             Array.Clear(_rank0IrArcImages, 0, _rank0IrArcImages.Length);
             _rank0IrRingVisible = false;
+            _airInterceptBorder = null;
+            _airInterceptLabel = null;
+            _airInterceptLastPing = float.NegativeInfinity;
+            _navalBorder = null;
+            _navalLabel = null;
+            _navalLastPing = float.NegativeInfinity;
+            _radarTruckBorder = null;
+            _radarTruckLabel = null;
+            _radarTruckLastPing = float.NegativeInfinity;
+            _boltstrikeBorder = null;
+            _boltstrikeLabel = null;
+            _boltstrikeLastPing = float.NegativeInfinity;
             _rank2TickImages.Clear();
             _rank4NotchOverlayRoot = null;
             _rank4NotchLines.Clear();
@@ -1920,6 +2691,23 @@ namespace TraditionalRWR
             _splashStatusText = null;
             _splashStatusLines = null;
             _splashActive = false;
+            _warningPanelRoot = null;
+            _warningPanelBackground = null;
+            _tgtLightBorder = null;
+            _tgtLightLabel = null;
+            _mslLightBorder = null;
+            _mslLightLabel = null;
+            _seenLightBorder = null;
+            _seenLightLabel = null;
+            _hiLoDiagonal = null;
+            _hiBorder = null;
+            _hiLabel = null;
+            _loBorder = null;
+            _loLabel = null;
+            _priorityEmitter = null;
+            _tgtLightState = default;
+            _seenLightState = default;
+            _startupPhase = WarningPanelStartupPhase.Done;
         }
 
         // Ground SARH launchers can borrow a nearby radar truck's radar
@@ -2609,6 +3397,83 @@ namespace TraditionalRWR
             }
         }
 
+        // Solid theme color for Rank0IndicatorPingHoldSeconds after the
+        // last matching ping, then a linear fade to off over
+        // Rank0IndicatorFadeSeconds -- a fresh ping before the fade starts
+        // just pushes LastPing forward, refreshing the hold rather than
+        // restarting anything (no separate "flash" stage like TGT/SEEN).
+        private static Color Rank0IndicatorColor(float lastPingTime, float holdSeconds)
+        {
+            float sincePing = Time.unscaledTime - lastPingTime;
+            if (sincePing <= holdSeconds)
+            {
+                return Rank0IndicatorActiveColor;
+            }
+
+            float fadeT = (sincePing - holdSeconds) / Rank0IndicatorFadeSeconds;
+            if (fadeT >= 1f)
+            {
+                return WarningLightOffColor;
+            }
+
+            return Color.Lerp(Rank0IndicatorActiveColor, WarningLightOffColor, fadeT);
+        }
+
+        // R9/T9 track a live state (an SARH missile currently guiding on
+        // the player, sourced from one of these specific units), not a
+        // discrete ping event -- unlike A/I/NVL, there's no fixed hold
+        // window here (holdSeconds passed as 0f below): LastPing just gets
+        // refreshed every single frame the threat is still active, so the
+        // light stays solid for exactly as long as the threat does and
+        // starts its 1s fade the instant that stops, instead of lingering
+        // "on" for a few extra seconds after the missile's actually gone.
+        // Single pass over _sarhThreatCounts checking both jsonKey sets at
+        // once, rather than two separate full iterations of the same
+        // dictionary every frame.
+        private void RefreshGroundSarhSourcePings()
+        {
+            foreach (Unit unit in _sarhThreatCounts.Keys)
+            {
+                if (unit == null || unit.definition == null)
+                {
+                    continue;
+                }
+                string jsonKey = unit.definition.jsonKey;
+                if (jsonKey == "HLT-R" || jsonKey == "Truck2-R" || jsonKey == "MC260_RadarContainer")
+                {
+                    _radarTruckLastPing = Time.unscaledTime;
+                }
+                else if (jsonKey == "RadarSAM1")
+                {
+                    _boltstrikeLastPing = Time.unscaledTime;
+                }
+            }
+        }
+
+        private void UpdateRank0CornerIndicators()
+        {
+            if (_airInterceptBorder == null)
+            {
+                return;
+            }
+
+            if (_currentRwrQuality != 0 || _splashActive)
+            {
+                ApplyLightColor(_airInterceptBorder, _airInterceptLabel, WarningLightOffColor);
+                ApplyLightColor(_navalBorder, _navalLabel, WarningLightOffColor);
+                ApplyLightColor(_radarTruckBorder, _radarTruckLabel, WarningLightOffColor);
+                ApplyLightColor(_boltstrikeBorder, _boltstrikeLabel, WarningLightOffColor);
+                return;
+            }
+
+            RefreshGroundSarhSourcePings();
+
+            ApplyLightColor(_airInterceptBorder, _airInterceptLabel, Rank0IndicatorColor(_airInterceptLastPing, Rank0IndicatorPingHoldSeconds));
+            ApplyLightColor(_navalBorder, _navalLabel, Rank0IndicatorColor(_navalLastPing, Rank0IndicatorPingHoldSeconds));
+            ApplyLightColor(_radarTruckBorder, _radarTruckLabel, Rank0IndicatorColor(_radarTruckLastPing, 0f));
+            ApplyLightColor(_boltstrikeBorder, _boltstrikeLabel, Rank0IndicatorColor(_boltstrikeLastPing, 0f));
+        }
+
         private void OnRadarWarningReceived(Aircraft.OnRadarWarning e)
         {
             try
@@ -2636,6 +3501,25 @@ namespace TraditionalRWR
                     return;
                 }
 
+                // Rank 0 A/I & NVL corner lamps -- tracked unconditionally
+                // (like _sarhThreatCounts etc.) regardless of current rank,
+                // so the state is already correct/fresh whenever the player
+                // is actually at Rank 0 to see it. IsTreatedAsShip() checked
+                // first, same precedence as CreateContact()'s symbol pick,
+                // so a Playable Ships unit (Aircraft-typed under the hood)
+                // pings NVL instead of A/I. R9/T9 aren't driven from here at
+                // all -- they track live SARH-threat state instead (see
+                // RefreshGroundSarhSourcePings(), called from
+                // UpdateRank0CornerIndicators()), not raw radar pings.
+                if (IsTreatedAsShip(e.emitter))
+                {
+                    _navalLastPing = Time.unscaledTime;
+                }
+                else if (e.emitter is Aircraft)
+                {
+                    _airInterceptLastPing = Time.unscaledTime;
+                }
+
                 if (_currentRwrQuality == 4 && IsCurrentlyJammed())
                 {
                     // Rank 4 loses its radar picture entirely while jammed
@@ -2653,10 +3537,28 @@ namespace TraditionalRWR
 
                 contact.LastSeenTime = Time.unscaledTime;
                 // Rank 0 can't tell a targeting radar apart from a searching
-                // one -- no red-on-lock color change at that quality.
+                // one -- no red-on-lock color change on the scope itself at
+                // that quality. The warning panel's TGT light is a separate
+                // system, though, and isn't rank-gated -- it reads e.isTarget
+                // directly rather than contact.IsTargeted, so it still fires
+                // at Rank 0 even though that contact's own icon stays green.
                 contact.IsTargeted = _currentRwrQuality != 0 && e.isTarget;
                 contact.BaseColor = contact.IsTargeted ? TargetedColor : ContactColor;
                 SetContactColor(contact, contact.BaseColor);
+
+                if (e.isTarget)
+                {
+                    TriggerSpike(ref _tgtLightState);
+                }
+                // Mirrors the minimap's own grey/yellow/red ping coloring --
+                // grey (e.detected false) is untouched, yellow (detected,
+                // not targeted) and red (targeted, always also detected)
+                // both count as "seen" here, so SEEN and TGT can flash
+                // together on the same targeting ping.
+                if (e.detected)
+                {
+                    TriggerSeenPing(ref _seenLightState);
+                }
             }
             catch (Exception ex)
             {
@@ -2798,17 +3700,22 @@ namespace TraditionalRWR
             UpdatePriorityDiamond();
         }
 
-        // Rank 1+ only: a hollow diamond tracks whichever contact currently
-        // has "priority" -- the closest actively-threatening contact
-        // (locked onto the player, or a SARH launcher guiding a missile at
-        // them) if any exist; otherwise the closest non-stale contact; a
-        // stale (dimmed/fading) contact is only picked if it's the only
-        // thing left on the scope at all. Re-run every frame so it keeps
-        // following as ranges/threats change.
-        // Not used at Rank 0 -- its own quadrant priority system already
-        // picks one contact per quadrant, and everything sits at a fixed
-        // display radius there so "closest" isn't meaningfully visualized.
-        // Also hidden entirely while jammed -- the picture is already
+        // A hollow diamond tracks whichever contact currently has
+        // "priority" -- the closest actively-threatening contact (locked
+        // onto the player, or a SARH launcher guiding a missile at them) if
+        // any exist; otherwise the closest non-stale contact; a stale
+        // (dimmed/fading) contact is only picked if it's the only thing
+        // left on the scope at all. Re-run every frame so it keeps
+        // following as ranges/threats change. Also sets _priorityEmitter,
+        // which the warning panel's HI/LO indicator reads independently of
+        // whether the diamond itself is showing.
+        // The diamond icon itself is Rank 1+ only -- Rank 0's own quadrant
+        // priority system already picks one contact per quadrant, and
+        // everything sits at a fixed display radius there so "closest"
+        // isn't meaningfully visualized on the scope. _priorityEmitter is
+        // still computed at Rank 0 though (just not drawn as a diamond),
+        // since HI/LO isn't rank-gated. Both the diamond and _priorityEmitter
+        // are hidden/cleared entirely while jammed -- the picture is already
         // unreliable then, so highlighting a "priority" contact out of
         // ghosts/blanked data would be misleading. Reappears on its own
         // once IsCurrentlyJammed() goes false again.
@@ -2819,19 +3726,23 @@ namespace TraditionalRWR
                 return;
             }
 
-            if (_currentRwrQuality < 1 || _playerAircraft == null || IsCurrentlyJammed())
+            if (_playerAircraft == null || IsCurrentlyJammed())
             {
                 _priorityDiamondImage.gameObject.SetActive(false);
+                _priorityEmitter = null;
                 return;
             }
 
             float now = Time.unscaledTime;
 
             TrackedContact closestThreat = null;
+            Unit closestThreatEmitter = null;
             float closestThreatDistSq = float.MaxValue;
             TrackedContact closestFresh = null;
+            Unit closestFreshEmitter = null;
             float closestFreshDistSq = float.MaxValue;
             TrackedContact closestStale = null;
+            Unit closestStaleEmitter = null;
             float closestStaleDistSq = float.MaxValue;
 
             foreach (KeyValuePair<Unit, TrackedContact> kvp in _contacts)
@@ -2850,6 +3761,7 @@ namespace TraditionalRWR
                 {
                     closestThreatDistSq = distSq;
                     closestThreat = contact;
+                    closestThreatEmitter = emitter;
                 }
 
                 // Mirrors UpdateContacts()'s own coloring split -- an active
@@ -2862,12 +3774,14 @@ namespace TraditionalRWR
                     {
                         closestStaleDistSq = distSq;
                         closestStale = contact;
+                        closestStaleEmitter = emitter;
                     }
                 }
                 else if (distSq < closestFreshDistSq)
                 {
                     closestFreshDistSq = distSq;
                     closestFresh = contact;
+                    closestFreshEmitter = emitter;
                 }
             }
 
@@ -2875,7 +3789,19 @@ namespace TraditionalRWR
             // there's nothing fresh or actively threatening left to
             // point at.
             TrackedContact priority = closestThreat ?? closestFresh ?? closestStale;
+            Unit priorityEmitter = closestThreat != null ? closestThreatEmitter
+                : closestFresh != null ? closestFreshEmitter
+                : closestStaleEmitter;
             if (priority == null || priority.Group == null)
+            {
+                _priorityDiamondImage.gameObject.SetActive(false);
+                _priorityEmitter = null;
+                return;
+            }
+
+            _priorityEmitter = priorityEmitter;
+
+            if (_currentRwrQuality < 1)
             {
                 _priorityDiamondImage.gameObject.SetActive(false);
                 return;
@@ -3150,13 +4076,13 @@ namespace TraditionalRWR
             RectTransform group = CreateContactGroup(_contactsOverlayRoot, "Contact_" + emitter.name, Vector2.zero);
 
             Image[] symbolImages;
-            if (emitter is Aircraft)
-            {
-                symbolImages = BuildChevronSymbol(group, Vector2.zero);
-            }
-            else if (emitter is Ship)
+            if (IsTreatedAsShip(emitter))
             {
                 symbolImages = new[] { CreateBar(group, "ShipSymbol", new Vector2(16f, 2f), new Vector2(0f, ShipSymbolVerticalOffset)) };
+            }
+            else if (emitter is Aircraft)
+            {
+                symbolImages = BuildChevronSymbol(group, Vector2.zero);
             }
             else
             {
@@ -3220,6 +4146,19 @@ namespace TraditionalRWR
             { "Aryx_HeavyFrigate1", "FFG" },        // Ironside Class Frigate
             { "Aryx_Supercarrier1", "CVN" },        // Penumbra Class Supercarrier (FS-41 bundle)
             { "Aryx_MissileFrigate_Styx", "PG" },   // Styx Class Missile Cutter
+
+            // Playable Ships addon -- same code as the vanilla class each
+            // one is equivalent to. LandingKraft omitted, same reasoning as
+            // Surf Class Patrol Boat above (no radar). PatrolBote isn't
+            // equivalent to any existing class, so it just gets a literal
+            // "PB" in both tables instead of a realistic/simple pair.
+            { "SmallKarrier", "CVE" },        // Cursor-class equivalent
+            { "PatrolBote", "PB" },
+            { "Korvette1", "FS" },            // Shard-class equivalent
+            { "Frickate1", "FFL" },           // Argus-class equivalent
+            { "Destroyer1_Player", "DDG" },   // Dynamo-class equivalent
+            { "AssaultKarrier", "AAS" },      // Annex-class equivalent
+            { "FleetKarrier", "CV" },         // Hyperion-class equivalent
         };
 
         // "Use Simple Ship Designators" (General tab) alternative to
@@ -3244,10 +4183,46 @@ namespace TraditionalRWR
             { "Aryx_HeavyFrigate1", "IRN" },        // Ironside Class Frigate
             { "Aryx_Supercarrier1", "PNU" },        // Penumbra Class Supercarrier (FS-41 bundle)
             { "Aryx_MissileFrigate_Styx", "STX" },  // Styx Class Missile Cutter
+
+            { "SmallKarrier", "CSR" },        // Cursor-class equivalent
+            { "PatrolBote", "PB" },
+            { "Korvette1", "SHD" },           // Shard-class equivalent
+            { "Frickate1", "ARG" },           // Argus-class equivalent
+            { "Destroyer1_Player", "DYN" },   // Dynamo-class equivalent
+            { "AssaultKarrier", "ANX" },      // Annex-class equivalent
+            { "FleetKarrier", "HYP" },        // Hyperion-class equivalent
         };
 
         private static Dictionary<string, string> ActiveShipCodeOverrides =>
             UseSimpleShipDesignators ? SimpleShipCodeOverrides : ShipCodeOverrides;
+
+        // Playable Ships addon makes these ship classes flyable, which
+        // means the units themselves are Aircraft (so they can be piloted)
+        // -- but every other RWR check (symbol shape, designation table)
+        // should still treat them as ships. IsTreatedAsShip() is the single
+        // choke point for that; every "emitter is Ship" check in this file
+        // goes through it instead, checked before any "is Aircraft" branch.
+        private static readonly HashSet<string> ShipTypeOverrideJsonKeys = new HashSet<string>
+        {
+            "SmallKarrier",
+            "LandingKraft",
+            "PatrolBote",
+            "Korvette1",
+            "Frickate1",
+            "Destroyer1_Player",
+            "AssaultKarrier",
+            "FleetKarrier",
+        };
+
+        private static bool IsTreatedAsShip(Unit emitter)
+        {
+            if (emitter is Ship)
+            {
+                return true;
+            }
+            return emitter.definition != null && !string.IsNullOrEmpty(emitter.definition.jsonKey)
+                && ShipTypeOverrideJsonKeys.Contains(emitter.definition.jsonKey);
+        }
 
         // Ground vehicles and buildings, also keyed by jsonKey. Note
         // radarStation1's jsonKey is lowercase-r, unlike the others.
@@ -3285,7 +4260,7 @@ namespace TraditionalRWR
 
         private string GetRank0Designation(Unit emitter)
         {
-            if (emitter is Ship)
+            if (IsTreatedAsShip(emitter))
             {
                 return "SHP";
             }
@@ -3341,7 +4316,7 @@ namespace TraditionalRWR
 
         private string GetRank1Designation(Unit emitter)
         {
-            if (emitter is Ship)
+            if (IsTreatedAsShip(emitter))
             {
                 if (emitter.definition != null && !string.IsNullOrEmpty(emitter.definition.jsonKey)
                     && ActiveShipCodeOverrides.TryGetValue(emitter.definition.jsonKey, out string shipCode))
@@ -3652,16 +4627,25 @@ namespace TraditionalRWR
         // cached at the time, so a mid-flight flip needs to walk every Text
         // already on screen once -- cheap since it only runs the frame the
         // setting actually changes (see the _lastBestFontEnabled check in
-        // Update()), not every frame.
+        // Update()), not every frame. _warningPanelRoot is a separate root
+        // from _scopeRoot (parented directly to the canvas, not under the
+        // scope), so both need their own sweep -- missing this was exactly
+        // why the warning panel's labels didn't respond to this toggle.
         private void RefreshAllLabelFonts()
         {
             _labelFont = ResolveLabelFont();
-            if (_scopeRoot == null)
+            ApplyFontToRoot(_scopeRoot);
+            ApplyFontToRoot(_warningPanelRoot);
+        }
+
+        private void ApplyFontToRoot(RectTransform root)
+        {
+            if (root == null)
             {
                 return;
             }
 
-            Text[] labels = _scopeRoot.GetComponentsInChildren<Text>(true);
+            Text[] labels = root.GetComponentsInChildren<Text>(true);
             for (int i = 0; i < labels.Length; i++)
             {
                 labels[i].font = _labelFont;

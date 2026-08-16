@@ -5,7 +5,7 @@ using UnityEngine;
 
 namespace TraditionalRWR
 {
-    [BepInPlugin("pavehog727.traditionalrwr", "KaceyTronic-RWR-1.0", "1.2.0")]
+    [BepInPlugin("pavehog727.traditionalrwr", "KaceyTronic-RWR-1.0", "1.3.0")]
     public class Plugin : BaseUnityPlugin
     {
         private void Awake()
@@ -47,6 +47,17 @@ namespace TraditionalRWR
                 RwrScopeController.UseSimpleShipDesignators = simpleShipDesignators.Value;
             };
 
+            ConfigEntry<bool> warningPanelToggle = Config.Bind(
+                "General",
+                "Warning Panel Toggle",
+                true,
+                "Shows/Hides the warning panel.");
+            RwrScopeController.ExtraPanelEnabled = warningPanelToggle.Value;
+            warningPanelToggle.SettingChanged += (sender, args) =>
+            {
+                RwrScopeController.ExtraPanelEnabled = warningPanelToggle.Value;
+            };
+
             ConfigEntry<bool> notchLineOnAllRanks = Config.Bind(
                 "General",
                 "Enable Notch line display for every Rank",
@@ -61,6 +72,7 @@ namespace TraditionalRWR
             BindRwrQualityOverrides();
             BindAppearanceSettings();
             BindPositionSettings();
+            BindWarningPanelPosition();
             // Bound last so its section lands at the very bottom of the
             // window (ConfigManager orders sections by first-bind order).
             BindSecretsSettings();
@@ -192,6 +204,33 @@ namespace TraditionalRWR
                     new ConfigurationManagerAttributes { Order = 0 }));
             RwrScopeController.ScopePositionY = positionY.Value;
             positionY.SettingChanged += (sender, args) => RwrScopeController.ScopePositionY = positionY.Value;
+        }
+
+        private void BindWarningPanelPosition()
+        {
+            const string section = "Warning Panel Position";
+
+            ConfigEntry<int> positionX = Config.Bind(
+                section,
+                "Warning Panel X Position",
+                0,
+                new ConfigDescription(
+                    "How far from the left edge of the screen the TGT/MSL warning panel sits. Default lines it up with the RWR scope.",
+                    new AcceptableValueRange<int>(0, 2300),
+                    new ConfigurationManagerAttributes { Order = 10 }));
+            RwrScopeController.WarningPanelPositionX = positionX.Value;
+            positionX.SettingChanged += (sender, args) => RwrScopeController.WarningPanelPositionX = positionX.Value;
+
+            ConfigEntry<int> positionY = Config.Bind(
+                section,
+                "Warning Panel Y Position",
+                716,
+                new ConfigDescription(
+                    "How far up from the bottom edge of the screen the TGT/MSL warning panel sits. Default sits just above the RWR scope.",
+                    new AcceptableValueRange<int>(0, 1180),
+                    new ConfigurationManagerAttributes { Order = 0 }));
+            RwrScopeController.WarningPanelPositionY = positionY.Value;
+            positionY.SettingChanged += (sender, args) => RwrScopeController.WarningPanelPositionY = positionY.Value;
         }
 
         private void BindSecretsSettings()
