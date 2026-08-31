@@ -1,5 +1,20 @@
 # KaceyTronic-RWR Changelog
 
+## 1.4.0 (2026-08-30)
+
+### Changed
+- Threat Panel is now referred to as **Billboard**.
+- The diagonal divider on the Hi/Lo on the default Billboard now stays off until a Hi or Lo lamp is triggered.
+
+### Fixed
+- MSL warning being stuck on after dying, in some cases.
+
+### Added
+- **Compact Billboard Toggle** — a smaller and more stylized version of the Billboard, if you prefer that.
+- **RWR and Billboard Scale settings** (ConfigManager) — everything scales smoothly... or should.
+- **Hide Minimap Option** — I have no mouth but I must LARP.
+- **Now supports Aryx's new airframe, the OA-27 Cavalier** (I still think it shoulda been called the Weevil...) — has a Rank 0 RWR like the Cricket. Considering adding a unique rank just for it, but we'll see.
+
 ## 1.3.0 (2026-08-16)
 
 ### Added

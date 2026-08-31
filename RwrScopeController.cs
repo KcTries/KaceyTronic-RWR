@@ -27,6 +27,80 @@ namespace TraditionalRWR
         // for troubleshooting, instead of needing a special debug build.
         public static bool DevToolsEnabled;
 
+        // "Hide Minimap" (General, see Plugin.cs). Entirely independent of
+        // the RWR scope's own build/rank state -- checked every frame
+        // regardless, from the very top of Update().
+        public static bool HideMinimap;
+        private bool _minimapWasHiddenByUs;
+
+        // We never call Maximize()/Minimize() or touch any map internals
+        // that DynamicMap itself needs to keep running -- SpawnQueuedIcons()
+        // and UpdateIcons() (called from DynamicMap's own Update()) turned
+        // out to be what tracks/spawns fired-munition icons on the HUD too,
+        // not just the map's own contents. Unity skips Update() entirely on
+        // any GameObject that isn't active-in-hierarchy, which includes
+        // every ancestor -- and DynamicMap.EnableCanvas() disables
+        // DynamicMap's own GameObject directly, while hudMapAnchor
+        // (Minimize() reparents DynamicMap's own transform INTO it) is an
+        // ANCESTOR of DynamicMap while minimized. Disabling either one was
+        // silently stopping DynamicMap's Update() loop, which is exactly
+        // why munitions stopped appearing anywhere on the HUD while this
+        // was on. Fixed by only ever disabling things that are CHILDREN of
+        // DynamicMap (mapImage -- its own visible content) or unrelated
+        // sibling components elsewhere (LowerLeftPanel's own Image), never
+        // DynamicMap itself or anything it's parented under.
+        // hudMapAnchor's own decorations (a light + some text, found by
+        // disabling hudMapAnchor itself, back when that seemed safe) are
+        // no longer hidden as a result -- they're not under DynamicMap, so
+        // there's no known safe way to reach them without finding their
+        // exact components the same way LowerLeftPanel's Image was found.
+        private DynamicMap _minimapDynamicMapInstance;
+        private Image _minimapPanelBackground;
+
+        private void UpdateMinimapVisibility()
+        {
+            DynamicMap dynamicMap = SceneSingleton<DynamicMap>.i;
+            if (dynamicMap == null || dynamicMap.hudMapAnchor == null || dynamicMap.mapImage == null)
+            {
+                return;
+            }
+
+            // Re-resolved whenever the DynamicMap singleton itself changes
+            // (e.g. mission restart) rather than cached forever, so this
+            // never holds onto a reference into a destroyed scene.
+            if (dynamicMap != _minimapDynamicMapInstance)
+            {
+                _minimapDynamicMapInstance = dynamicMap;
+                Transform lowerLeftPanel = dynamicMap.hudMapAnchor.parent;
+                _minimapPanelBackground = lowerLeftPanel != null ? lowerLeftPanel.GetComponent<Image>() : null;
+            }
+
+            GameObject minimapContent = dynamicMap.mapImage;
+
+            if (HideMinimap && !DynamicMap.mapMaximized)
+            {
+                minimapContent.SetActive(false);
+                if (_minimapPanelBackground != null)
+                {
+                    _minimapPanelBackground.enabled = false;
+                }
+                _minimapWasHiddenByUs = true;
+            }
+            else if (_minimapWasHiddenByUs)
+            {
+                // Toggle turned off (or the player maximized the map) after
+                // we'd been suppressing it -- restore once immediately
+                // instead of leaving it stuck hidden until the game's own
+                // next Minimize()/Maximize() cycle happens to touch it.
+                minimapContent.SetActive(true);
+                if (_minimapPanelBackground != null)
+                {
+                    _minimapPanelBackground.enabled = true;
+                }
+                _minimapWasHiddenByUs = false;
+            }
+        }
+
         // BepInEx\plugins\rwrdebug\ -- not the Desktop, since this ships to
         // other players now, not just the dev machine. A hardcoded
         // C:\Users\<dev>\Desktop\... path (the old location) would silently
@@ -138,6 +212,7 @@ namespace TraditionalRWR
                 }
 
                 DumpUnitDefinitionsOnce();
+                UpdateMinimapVisibility();
 
                 if (_built)
                 {
@@ -468,6 +543,26 @@ namespace TraditionalRWR
         // position), not just the TrackedContact the diamond itself uses.
         private Unit _priorityEmitter;
 
+        // Compact billboard ("Use compact Billboard" in ConfigManager) --
+        // an alternative layout for the same panel: an eye (SEEN in the
+        // iris; TGT takes over the whole eye when it spikes) plus two
+        // chevrons (HI/LO direction, overridden by a missile-style flash
+        // when an actual missile threat is above/below). Built alongside
+        // the full billboard at the same position, sharing its
+        // _tgtLightState/_seenLightState/_priorityEmitter -- only one of
+        // the two roots is ever active at a time (see UpdateWarningPanel()).
+        private RectTransform _compactBillboardRoot;
+        private Image _compactBillboardBackground;
+        private Image _eyeOutlineImage;
+        private Image _eyeIrisImage;
+        private Image _hiChevronImage;
+        private Image _loChevronImage;
+        // SARH missile Unit references, mirroring _irMissileContacts'
+        // pattern -- _sarhThreatCounts alone (keyed by source unit, not
+        // missile) can't give the compact billboard's chevrons a missile's
+        // actual position for the above/below check.
+        private readonly HashSet<Missile> _sarhMissileContacts = new HashSet<Missile>();
+
         // One-shot boot self-test, independent of the scope's own splash
         // (own timing, not tied to SplashDisplaySeconds) -- retriggered
         // every respawn from EnsureSubscribed(), same as ShowSplashScreen().
@@ -514,6 +609,7 @@ namespace TraditionalRWR
             _scopeRoot = BuildScopeRoot(canvasTransform);
             BuildBackground(_scopeRoot);
             BuildWarningPanel(canvasTransform);
+            BuildCompactBillboard(canvasTransform);
 
             _normalOverlayRoot = BuildOverlayRoot(_scopeRoot, "NormalOverlay");
             _normalRingImage = BuildRing(_normalOverlayRoot, NormalRingThickness);
@@ -667,21 +763,20 @@ namespace TraditionalRWR
             {
                 _warningPanelBackground.color = WithOpacity(BackgroundBaseColor);
             }
-            // The HI/LO diagonal divider is never touched elsewhere -- it
-            // has no active/inactive state of its own (that's on the HI/LO
-            // borders+labels individually), so it just sits at the idle
-            // look permanently and only needs live theme/opacity sync.
-            if (_hiLoDiagonal != null)
+            if (_compactBillboardBackground != null)
             {
-                _hiLoDiagonal.color = WarningLightIdleColor;
+                _compactBillboardBackground.color = WithOpacity(BackgroundBaseColor);
             }
-            // TGT/MSL/SEEN border+text and HI/LO border+label colors are
-            // not re-tinted here -- UpdateWarningPanel() (via
+            // TGT/MSL/SEEN border+text, HI/LO border+label, and now the
+            // HI/LO diagonal divider colors are not re-tinted here --
+            // UpdateWarningPanel() (via
             // UpdateSpikeLight()/UpdateHiLoIndicator()/ApplyLightColor())
-            // already recomputes them every frame from live state, and runs
-            // earlier in Update() than this method -- touching them here
-            // too would stomp that frame's animated color right back to a
-            // static one.
+            // already recomputes them every frame from live state (the
+            // divider now goes black unless HI or LO is active, matching
+            // WarningLightIdleColor/WarningLightOffColor's live theme sync
+            // on its own), and runs earlier in Update() than this method --
+            // touching them here too would stomp that frame's animated
+            // color right back to a static one.
         }
 
         private void BuildSplashScreen(RectTransform parent)
@@ -924,17 +1019,29 @@ namespace TraditionalRWR
         // position, so an untouched install looks unchanged.
         public static float ScopePositionX = 0f;
         public static float ScopePositionY = 446f;
+        // Multiplied into the scope's own localScale alongside Dealer
+        // Mode's squish (see UpdateScopePosition()) -- 1f is the original,
+        // unscaled size.
+        public static float ScopeScale = 1f;
 
-        // Set from Plugin.Awake() ("Warning Panel Position" section) and
+        // Set from Plugin.Awake() ("Billboard Position" section) and
         // live-updated via UpdateWarningPanelPosition(). Defaults stack the
         // panel directly above the scope (ScopePositionY's default +
         // PanelSize + a small gap).
         public static float WarningPanelPositionX = 0f;
         public static float WarningPanelPositionY = 716f;
+        // Shared by both billboard layouts (full and compact), same as the
+        // position fields above.
+        public static float BillboardScale = 1f;
 
         // Set from Plugin.Awake() ("General" section), live-updated in
         // ConfigManager. Panel is always built; this just toggles it active.
         public static bool ExtraPanelEnabled = true;
+
+        // Set from Plugin.Awake() ("General" section), live-updated in
+        // ConfigManager. Both billboard layouts are always built; this just
+        // picks which one is currently shown/updated (see UpdateWarningPanel()).
+        public static bool UseCompactBillboard = false;
 
         private RectTransform BuildScopeRoot(Transform parent)
         {
@@ -986,14 +1093,18 @@ namespace TraditionalRWR
             }
 
             ComputeDealerModeSquish(out float scaleX, out float scaleY);
+            scaleX *= ScopeScale;
+            scaleY *= ScopeScale;
 
             // _scopeRoot's pivot is bottom-left (see BuildScopeRoot), so
             // scaling Y already keeps the bottom edge fixed for free --
             // only the top comes down. X needs a compensating shift,
-            // though (zero when Dealer Mode is off, since scaleX is then
-            // exactly 1), or widening would only grow the panel rightward
-            // off the left edge instead of bulging out symmetrically
-            // around its horizontal center.
+            // though (zero at scaleX=1, i.e. Dealer Mode off and
+            // ScopeScale at its default), or widening would only grow the
+            // panel rightward off the left edge instead of bulging out
+            // symmetrically around its horizontal center. Same formula
+            // whether the extra size came from Dealer Mode's squish,
+            // ScopeScale, or both at once.
             float compensatedX = ScopePositionX + (PanelSize / 2f) * (1f - scaleX);
 
             _scopeRoot.anchoredPosition = new Vector2(compensatedX, ScopePositionY);
@@ -1045,6 +1156,98 @@ namespace TraditionalRWR
         private const float HiLoLabelOffsetX = WarningLightWidth / 4f;
         private const float HiLoLabelOffsetY = WarningLightHeight / 4f;
 
+        // Compact billboard: eye on top of two chevrons, tall/narrow instead
+        // of the full billboard's wide/short shape -- shares
+        // WarningPanelPositionX/Y (same anchor corner) rather than getting
+        // its own position config, since it's a layout swap for the same
+        // panel, not a second independent one.
+        private const float CompactBillboardWidth = 90f;
+        private const float CompactBillboardHeight = 136f;
+        private const float EyeOutlineWidth = 70f;
+        private const float EyeOutlineHeight = 38f;
+        private const float EyeOutlineThickness = 4f;
+        // Half-width of the notch cut into the eye outline at its leftmost
+        // and rightmost points (see CreateEyeOutlineSprite) -- purely
+        // cosmetic, gives the ring an eye-shaped read instead of a plain oval.
+        private const float EyeGapHalfAngleDegrees = 12f;
+        private const float EyeIrisDiameter = 20f;
+        private const float ChevronWidth = 50f;
+        private const float ChevronHeight = 26f;
+        private const float ChevronThickness = 5f;
+        private const float ChevronGap = 8f;
+        private const float ChevronOffsetY = (EyeOutlineHeight / 2f) + ChevronGap + (ChevronHeight / 2f);
+
+        private void BuildCompactBillboard(Transform canvasTransform)
+        {
+            GameObject rootObject = new GameObject("CompactBillboardRoot", typeof(RectTransform));
+            RectTransform rect = rootObject.GetComponent<RectTransform>();
+            rect.SetParent(canvasTransform, false);
+            rect.anchorMin = Vector2.zero;
+            rect.anchorMax = Vector2.zero;
+            rect.pivot = Vector2.zero;
+            rect.sizeDelta = new Vector2(CompactBillboardWidth, CompactBillboardHeight);
+            rect.anchoredPosition = new Vector2(WarningPanelPositionX, WarningPanelPositionY);
+            _compactBillboardRoot = rect;
+
+            GameObject backgroundObject = new GameObject("Background", typeof(RectTransform), typeof(Image));
+            RectTransform backgroundRect = backgroundObject.GetComponent<RectTransform>();
+            backgroundRect.SetParent(_compactBillboardRoot, false);
+            backgroundRect.anchorMin = Vector2.zero;
+            backgroundRect.anchorMax = Vector2.one;
+            backgroundRect.offsetMin = Vector2.zero;
+            backgroundRect.offsetMax = Vector2.zero;
+            _compactBillboardBackground = backgroundObject.GetComponent<Image>();
+            _compactBillboardBackground.sprite = CreateRoundedRectSprite(Mathf.RoundToInt(CompactBillboardWidth), Mathf.RoundToInt(CompactBillboardHeight), 18f, Color.white);
+            _compactBillboardBackground.color = WithOpacity(BackgroundBaseColor);
+            _compactBillboardBackground.raycastTarget = false;
+
+            GameObject eyeOutlineObject = new GameObject("EyeOutline", typeof(RectTransform), typeof(Image));
+            RectTransform eyeOutlineRect = eyeOutlineObject.GetComponent<RectTransform>();
+            eyeOutlineRect.SetParent(_compactBillboardRoot, false);
+            eyeOutlineRect.anchorMin = new Vector2(0.5f, 0.5f);
+            eyeOutlineRect.anchorMax = new Vector2(0.5f, 0.5f);
+            eyeOutlineRect.pivot = new Vector2(0.5f, 0.5f);
+            eyeOutlineRect.sizeDelta = new Vector2(EyeOutlineWidth, EyeOutlineHeight);
+            eyeOutlineRect.anchoredPosition = Vector2.zero;
+            _eyeOutlineImage = eyeOutlineObject.GetComponent<Image>();
+            _eyeOutlineImage.sprite = CreateEyeOutlineSprite(Mathf.RoundToInt(EyeOutlineWidth), Mathf.RoundToInt(EyeOutlineHeight), EyeOutlineThickness, EyeGapHalfAngleDegrees);
+            _eyeOutlineImage.color = Themed(0.9f);
+            _eyeOutlineImage.raycastTarget = false;
+
+            GameObject irisObject = new GameObject("EyeIris", typeof(RectTransform), typeof(Image));
+            RectTransform irisRect = irisObject.GetComponent<RectTransform>();
+            irisRect.SetParent(_compactBillboardRoot, false);
+            irisRect.anchorMin = new Vector2(0.5f, 0.5f);
+            irisRect.anchorMax = new Vector2(0.5f, 0.5f);
+            irisRect.pivot = new Vector2(0.5f, 0.5f);
+            irisRect.sizeDelta = new Vector2(EyeIrisDiameter, EyeIrisDiameter);
+            irisRect.anchoredPosition = Vector2.zero;
+            _eyeIrisImage = irisObject.GetComponent<Image>();
+            _eyeIrisImage.sprite = CreateFilledCircleSprite(Mathf.RoundToInt(EyeIrisDiameter));
+            _eyeIrisImage.color = WarningLightOffColor;
+            _eyeIrisImage.raycastTarget = false;
+
+            _hiChevronImage = BuildChevron(_compactBillboardRoot, "HiChevron", new Vector2(0f, ChevronOffsetY), pointingUp: true);
+            _loChevronImage = BuildChevron(_compactBillboardRoot, "LoChevron", new Vector2(0f, -ChevronOffsetY), pointingUp: false);
+        }
+
+        private Image BuildChevron(RectTransform parent, string name, Vector2 position, bool pointingUp)
+        {
+            GameObject chevronObject = new GameObject(name, typeof(RectTransform), typeof(Image));
+            RectTransform rect = chevronObject.GetComponent<RectTransform>();
+            rect.SetParent(parent, false);
+            rect.anchorMin = new Vector2(0.5f, 0.5f);
+            rect.anchorMax = new Vector2(0.5f, 0.5f);
+            rect.pivot = new Vector2(0.5f, 0.5f);
+            rect.sizeDelta = new Vector2(ChevronWidth, ChevronHeight);
+            rect.anchoredPosition = position;
+            Image image = chevronObject.GetComponent<Image>();
+            image.sprite = CreateChevronSprite(Mathf.RoundToInt(ChevronWidth), Mathf.RoundToInt(ChevronHeight), ChevronThickness, pointingUp);
+            image.color = WarningLightOffColor;
+            image.raycastTarget = false;
+            return image;
+        }
+
         private void BuildWarningPanel(Transform canvasTransform)
         {
             GameObject rootObject = new GameObject("WarningPanelRoot", typeof(RectTransform));
@@ -1087,7 +1290,7 @@ namespace TraditionalRWR
             diagonalRect.anchoredPosition = position;
             _hiLoDiagonal = diagonalObject.GetComponent<Image>();
             _hiLoDiagonal.sprite = CreateHiLoDiagonalSprite(Mathf.RoundToInt(WarningLightWidth), Mathf.RoundToInt(WarningLightHeight), HiLoDiagonalThickness);
-            _hiLoDiagonal.color = WarningLightIdleColor;
+            _hiLoDiagonal.color = WarningLightOffColor;
             _hiLoDiagonal.raycastTarget = false;
 
             // Diagonal runs top-left to bottom-right, splitting the box
@@ -1141,16 +1344,27 @@ namespace TraditionalRWR
 
         private void UpdateWarningPanelPosition()
         {
-            if (_warningPanelRoot == null)
+            ComputeDealerModeSquish(out float scaleX, out float scaleY);
+            scaleX *= BillboardScale;
+            scaleY *= BillboardScale;
+
+            if (_warningPanelRoot != null)
             {
-                return;
+                float compensatedX = WarningPanelPositionX + (PanelSize / 2f) * (1f - scaleX);
+                _warningPanelRoot.anchoredPosition = new Vector2(compensatedX, WarningPanelPositionY);
+                _warningPanelRoot.localScale = new Vector3(scaleX, scaleY, 1f);
             }
 
-            ComputeDealerModeSquish(out float scaleX, out float scaleY);
-            float compensatedX = WarningPanelPositionX + (PanelSize / 2f) * (1f - scaleX);
-
-            _warningPanelRoot.anchoredPosition = new Vector2(compensatedX, WarningPanelPositionY);
-            _warningPanelRoot.localScale = new Vector3(scaleX, scaleY, 1f);
+            if (_compactBillboardRoot != null)
+            {
+                // Same X-compensation idea as the full panel, but around the
+                // compact billboard's own (much narrower) width instead of
+                // PanelSize, or the combined Dealer Mode/BillboardScale
+                // scaling would bulge it off-center.
+                float compensatedX = WarningPanelPositionX + (CompactBillboardWidth / 2f) * (1f - scaleX);
+                _compactBillboardRoot.anchoredPosition = new Vector2(compensatedX, WarningPanelPositionY);
+                _compactBillboardRoot.localScale = new Vector3(scaleX, scaleY, 1f);
+            }
         }
 
         private void StartWarningPanelStartupSequence()
@@ -1161,17 +1375,21 @@ namespace TraditionalRWR
 
         // Picks the color for whichever step `elapsedInPhase` currently
         // falls in, holding on the last step once the phase's own elapsed
-        // check (in UpdateWarningPanelStartup()) is about to advance it.
+        // check (in AdvanceWarningPanelStartup()) is about to advance it.
         private static Color StartupStepColor(float elapsedInPhase, Color[] steps)
         {
             int index = Mathf.Clamp(Mathf.FloorToInt(elapsedInPhase / StartupColorStepSeconds), 0, steps.Length - 1);
             return steps[index];
         }
 
-        // Returns true while the startup sequence owns the panel's colors
-        // this frame (caller should skip its own normal-state logic), false
-        // once it's finished and normal per-light logic should resume.
-        private bool UpdateWarningPanelStartup()
+        // Phase transitions only, no color output -- shared by both
+        // billboard layouts (called once from the dispatcher regardless of
+        // which one is showing), which then each render the current phase
+        // onto their own elements via RenderFullBillboardStartup()/
+        // RenderCompactBillboardStartup(). Returns true while the startup
+        // sequence owns the panel's colors this frame (caller should skip
+        // its own normal-state logic), false once it's finished.
+        private bool AdvanceWarningPanelStartup()
         {
             if (_startupPhase == WarningPanelStartupPhase.Done)
             {
@@ -1183,16 +1401,62 @@ namespace TraditionalRWR
             switch (_startupPhase)
             {
                 case WarningPanelStartupPhase.Black:
-                    ApplyLightColor(_tgtLightBorder, _tgtLightLabel, WarningLightOffColor);
-                    ApplyLightColor(_mslLightBorder, _mslLightLabel, WarningLightOffColor);
-                    ApplyLightColor(_seenLightBorder, _seenLightLabel, WarningLightOffColor);
-                    ApplyLightColor(_hiBorder, _hiLabel, WarningLightOffColor);
-                    ApplyLightColor(_loBorder, _loLabel, WarningLightOffColor);
                     if (elapsed >= StartupBlackSeconds)
                     {
                         _startupPhase = WarningPanelStartupPhase.TestingTgt;
                         _startupPhaseStartTime = Time.unscaledTime;
                     }
+                    break;
+                case WarningPanelStartupPhase.TestingTgt:
+                    // 2 steps: TargetedColor, WarningLightOffColor.
+                    if (elapsed >= 2 * StartupColorStepSeconds)
+                    {
+                        _startupPhase = WarningPanelStartupPhase.TestingMsl;
+                        _startupPhaseStartTime = Time.unscaledTime;
+                    }
+                    break;
+                case WarningPanelStartupPhase.TestingMsl:
+                    // 3 steps: TargetedColor, SeenColor, WarningLightOffColor.
+                    if (elapsed >= 3 * StartupColorStepSeconds)
+                    {
+                        _startupPhase = WarningPanelStartupPhase.TestingSeen;
+                        _startupPhaseStartTime = Time.unscaledTime;
+                    }
+                    break;
+                case WarningPanelStartupPhase.TestingSeen:
+                    // 2 steps: SeenColor, WarningLightOffColor.
+                    if (elapsed >= 2 * StartupColorStepSeconds)
+                    {
+                        _startupPhase = WarningPanelStartupPhase.TestingHiLo;
+                        _startupPhaseStartTime = Time.unscaledTime;
+                    }
+                    break;
+                case WarningPanelStartupPhase.TestingHiLo:
+                    // 2 steps: TargetedColor (or per-chevron equivalent),
+                    // WarningLightOffColor.
+                    if (elapsed >= 2 * StartupColorStepSeconds)
+                    {
+                        _startupPhase = WarningPanelStartupPhase.Done;
+                    }
+                    break;
+            }
+
+            return true;
+        }
+
+        private void RenderFullBillboardStartup()
+        {
+            float elapsed = Time.unscaledTime - _startupPhaseStartTime;
+
+            switch (_startupPhase)
+            {
+                case WarningPanelStartupPhase.Black:
+                    ApplyLightColor(_tgtLightBorder, _tgtLightLabel, WarningLightOffColor);
+                    ApplyLightColor(_mslLightBorder, _mslLightLabel, WarningLightOffColor);
+                    ApplyLightColor(_seenLightBorder, _seenLightLabel, WarningLightOffColor);
+                    ApplyLightColor(_hiBorder, _hiLabel, WarningLightOffColor);
+                    ApplyLightColor(_loBorder, _loLabel, WarningLightOffColor);
+                    SetHiLoDiagonalColor(WarningLightOffColor);
                     break;
 
                 case WarningPanelStartupPhase.TestingTgt:
@@ -1203,11 +1467,7 @@ namespace TraditionalRWR
                     ApplyLightColor(_seenLightBorder, _seenLightLabel, WarningLightOffColor);
                     ApplyLightColor(_hiBorder, _hiLabel, WarningLightOffColor);
                     ApplyLightColor(_loBorder, _loLabel, WarningLightOffColor);
-                    if (elapsed >= steps.Length * StartupColorStepSeconds)
-                    {
-                        _startupPhase = WarningPanelStartupPhase.TestingMsl;
-                        _startupPhaseStartTime = Time.unscaledTime;
-                    }
+                    SetHiLoDiagonalColor(WarningLightOffColor);
                     break;
                 }
 
@@ -1219,11 +1479,7 @@ namespace TraditionalRWR
                     ApplyLightColor(_seenLightBorder, _seenLightLabel, WarningLightOffColor);
                     ApplyLightColor(_hiBorder, _hiLabel, WarningLightOffColor);
                     ApplyLightColor(_loBorder, _loLabel, WarningLightOffColor);
-                    if (elapsed >= steps.Length * StartupColorStepSeconds)
-                    {
-                        _startupPhase = WarningPanelStartupPhase.TestingSeen;
-                        _startupPhaseStartTime = Time.unscaledTime;
-                    }
+                    SetHiLoDiagonalColor(WarningLightOffColor);
                     break;
                 }
 
@@ -1235,11 +1491,7 @@ namespace TraditionalRWR
                     ApplyLightColor(_seenLightBorder, _seenLightLabel, StartupStepColor(elapsed, steps));
                     ApplyLightColor(_hiBorder, _hiLabel, WarningLightOffColor);
                     ApplyLightColor(_loBorder, _loLabel, WarningLightOffColor);
-                    if (elapsed >= steps.Length * StartupColorStepSeconds)
-                    {
-                        _startupPhase = WarningPanelStartupPhase.TestingHiLo;
-                        _startupPhaseStartTime = Time.unscaledTime;
-                    }
+                    SetHiLoDiagonalColor(WarningLightOffColor);
                     break;
                 }
 
@@ -1252,15 +1504,90 @@ namespace TraditionalRWR
                     ApplyLightColor(_seenLightBorder, _seenLightLabel, WarningLightOffColor);
                     ApplyLightColor(_hiBorder, _hiLabel, hiLoColor);
                     ApplyLightColor(_loBorder, _loLabel, hiLoColor);
-                    if (elapsed >= steps.Length * StartupColorStepSeconds)
-                    {
-                        _startupPhase = WarningPanelStartupPhase.Done;
-                    }
+                    // Diagonal tracks the same on/off step as the HI/LO
+                    // borders here -- in live play it only lights up
+                    // (WarningLightIdleColor, via UpdateHiLoIndicator())
+                    // when HI or LO is actually active, so the test should
+                    // exercise that same transition rather than just
+                    // leaving it black throughout.
+                    SetHiLoDiagonalColor(hiLoColor == WarningLightOffColor ? WarningLightOffColor : WarningLightIdleColor);
                     break;
                 }
             }
+        }
 
-            return true;
+        private void SetHiLoDiagonalColor(Color color)
+        {
+            if (_hiLoDiagonal != null)
+            {
+                _hiLoDiagonal.color = color;
+            }
+        }
+
+        // Same phase/timing as the full billboard, remapped onto the eye +
+        // chevrons: TGT phase -> whole eye; MSL phase -> both chevrons
+        // together (no dedicated compact element for MSL, and chevrons are
+        // what carries missile-threat info here -- see
+        // UpdateCompactBillboardContent()); SEEN phase -> whole eye again;
+        // HI/LO phase -> each chevron cycling its own real "on" color
+        // (yellow for HI, red for LO) instead of sharing one.
+        private void RenderCompactBillboardStartup()
+        {
+            float elapsed = Time.unscaledTime - _startupPhaseStartTime;
+
+            switch (_startupPhase)
+            {
+                case WarningPanelStartupPhase.Black:
+                    _eyeOutlineImage.color = WarningLightOffColor;
+                    _eyeIrisImage.color = WarningLightOffColor;
+                    _hiChevronImage.color = WarningLightOffColor;
+                    _loChevronImage.color = WarningLightOffColor;
+                    break;
+
+                case WarningPanelStartupPhase.TestingTgt:
+                {
+                    Color[] steps = { TargetedColor, WarningLightOffColor };
+                    Color color = StartupStepColor(elapsed, steps);
+                    _eyeOutlineImage.color = color;
+                    _eyeIrisImage.color = color;
+                    _hiChevronImage.color = WarningLightOffColor;
+                    _loChevronImage.color = WarningLightOffColor;
+                    break;
+                }
+
+                case WarningPanelStartupPhase.TestingMsl:
+                {
+                    Color[] steps = { TargetedColor, SeenColor, WarningLightOffColor };
+                    Color color = StartupStepColor(elapsed, steps);
+                    _eyeOutlineImage.color = WarningLightOffColor;
+                    _eyeIrisImage.color = WarningLightOffColor;
+                    _hiChevronImage.color = color;
+                    _loChevronImage.color = color;
+                    break;
+                }
+
+                case WarningPanelStartupPhase.TestingSeen:
+                {
+                    Color[] steps = { SeenColor, WarningLightOffColor };
+                    Color color = StartupStepColor(elapsed, steps);
+                    _eyeOutlineImage.color = color;
+                    _eyeIrisImage.color = color;
+                    _hiChevronImage.color = WarningLightOffColor;
+                    _loChevronImage.color = WarningLightOffColor;
+                    break;
+                }
+
+                case WarningPanelStartupPhase.TestingHiLo:
+                {
+                    Color[] hiSteps = { SeenColor, WarningLightOffColor };
+                    Color[] loSteps = { TargetedColor, WarningLightOffColor };
+                    _eyeOutlineImage.color = WarningLightOffColor;
+                    _eyeIrisImage.color = WarningLightOffColor;
+                    _hiChevronImage.color = StartupStepColor(elapsed, hiSteps);
+                    _loChevronImage.color = StartupStepColor(elapsed, loSteps);
+                    break;
+                }
+            }
         }
 
         // TGT: any current radar contact has the player specifically
@@ -1278,37 +1605,77 @@ namespace TraditionalRWR
         // same as every other live overlay -- spike states are forced back
         // to Idle rather than left running so they don't silently keep
         // counting down underneath it.
+        // Dispatcher: the full billboard (TGT/MSL/SEEN/HI-LO boxes) and the
+        // compact billboard (eye + chevrons) are both always built, sharing
+        // _tgtLightState/_seenLightState/_priorityEmitter so an in-progress
+        // animation carries over seamlessly if the toggle changes live --
+        // only one of the two ever has its content actually updated per
+        // frame, chosen by UseCompactBillboard, so UpdateSpikeLight() (which
+        // mutates state as a side effect) never gets called twice for the
+        // same light in the same frame.
         private void UpdateWarningPanel()
         {
-            if (_warningPanelRoot == null)
+            if (_warningPanelRoot != null)
             {
-                return;
+                _warningPanelRoot.gameObject.SetActive(ExtraPanelEnabled && !UseCompactBillboard);
             }
-
-            _warningPanelRoot.gameObject.SetActive(ExtraPanelEnabled);
+            if (_compactBillboardRoot != null)
+            {
+                _compactBillboardRoot.gameObject.SetActive(ExtraPanelEnabled && UseCompactBillboard);
+            }
             if (!ExtraPanelEnabled)
             {
                 return;
             }
 
             // A genuine targeting lock or missile threat firing mid-animation
-            // takes priority over the cosmetic boot sequence -- the trigger
-            // methods set _tgtLightState/_sarhThreatCounts/etc. unconditionally
-            // regardless of startup state, but nothing advances or displays
-            // that state until the startup sequence actually finishes, so
-            // without this check a threat that appears during the first
-            // ~3.65s after respawn would go unseen until it's already stale.
-            // Deliberately scoped to TGT/MSL only (not SEEN or HI/LO, which
-            // fire on routine radar activity / any nearby contact) -- those
-            // are common enough in a populated mission that including them
-            // would abort the animation almost every single respawn.
+            // takes priority over the cosmetic boot sequence, regardless of
+            // which billboard layout is currently displaying it -- the
+            // trigger methods set _tgtLightState/_sarhThreatCounts/etc.
+            // unconditionally regardless of startup state, but nothing
+            // advances or displays that state until the startup sequence
+            // actually finishes, so without this check a threat that
+            // appears during the first ~3.65s after respawn would go unseen
+            // until it's already stale. Deliberately scoped to TGT/MSL only
+            // (not SEEN or HI/LO, which fire on routine radar activity/any
+            // nearby contact) -- those are common enough in a populated
+            // mission that including them would abort the animation almost
+            // every single respawn.
             if (_startupPhase != WarningPanelStartupPhase.Done
                 && (_tgtLightState.Phase != SpikeLightPhase.Idle || _sarhThreatCounts.Count > 0 || _arhMissileContacts.Count > 0))
             {
                 _startupPhase = WarningPanelStartupPhase.Done;
             }
 
-            if (UpdateWarningPanelStartup())
+            bool startupRunning = AdvanceWarningPanelStartup();
+
+            if (UseCompactBillboard)
+            {
+                if (startupRunning)
+                {
+                    RenderCompactBillboardStartup();
+                }
+                else
+                {
+                    UpdateCompactBillboardContent();
+                }
+            }
+            else
+            {
+                if (startupRunning)
+                {
+                    RenderFullBillboardStartup();
+                }
+                else
+                {
+                    UpdateFullBillboardContent();
+                }
+            }
+        }
+
+        private void UpdateFullBillboardContent()
+        {
+            if (_warningPanelRoot == null)
             {
                 return;
             }
@@ -1344,19 +1711,139 @@ namespace TraditionalRWR
             UpdateHiLoIndicator();
         }
 
-        private void UpdateHiLoIndicator()
+        private void GetPriorityDirection(out bool above, out bool below)
         {
-            bool priorityAbove = false;
-            bool priorityBelow = false;
+            above = false;
+            below = false;
             if (_priorityEmitter != null && _playerAircraft != null)
             {
                 float deltaY = _priorityEmitter.transform.position.y - _playerAircraft.transform.position.y;
-                priorityAbove = deltaY > 0f;
-                priorityBelow = deltaY < 0f;
+                above = deltaY > 0f;
+                below = deltaY < 0f;
             }
+        }
 
+        private void UpdateHiLoIndicator()
+        {
+            GetPriorityDirection(out bool priorityAbove, out bool priorityBelow);
             ApplyLightColor(_hiBorder, _hiLabel, priorityAbove ? TargetedColor : WarningLightOffColor);
             ApplyLightColor(_loBorder, _loLabel, priorityBelow ? TargetedColor : WarningLightOffColor);
+            if (_hiLoDiagonal != null)
+            {
+                _hiLoDiagonal.color = (priorityAbove || priorityBelow) ? WarningLightIdleColor : WarningLightOffColor;
+            }
+        }
+
+        // Compact billboard: an "eye" (SEEN in the iris, TGT taking over the
+        // whole eye when it spikes) plus two chevrons (HI/LO direction,
+        // overridden by a missile-style flash whenever an actual SARH/ARH
+        // missile threat is currently above/below). No boot self-test here
+        // -- that's a full-billboard-only cosmetic, not worth building a
+        // second version of for a mode nobody's asked to see one on.
+        private void UpdateCompactBillboardContent()
+        {
+            if (_eyeOutlineImage == null)
+            {
+                return;
+            }
+
+            if (_splashActive)
+            {
+                // Shared with the full billboard -- reset here too, or a
+                // spike that was mid-flash when splash triggered would sit
+                // frozen and could resume oddly once splash ends, since
+                // this path (unlike the full one) doesn't otherwise touch
+                // these fields at all.
+                _tgtLightState.Phase = SpikeLightPhase.Idle;
+                _seenLightState.Phase = SpikeLightPhase.Idle;
+                _eyeOutlineImage.color = WarningLightOffColor;
+                _eyeIrisImage.color = WarningLightOffColor;
+                _hiChevronImage.color = WarningLightOffColor;
+                _loChevronImage.color = WarningLightOffColor;
+                return;
+            }
+
+            // TGT and SEEN both take over the entire eye (outline + iris
+            // together) for the duration of their own spike -- TGT wins if
+            // both happen to be active at once, since it's the more severe
+            // signal. Resting look (both idle) is outline=theme green,
+            // iris=off. Both state machines still have to run every frame
+            // regardless of which one is currently visible, or a real ping
+            // that arrives while the other one's spike is showing would
+            // never get its own hold window counted correctly.
+            Color tgtColor = UpdateSpikeLight(ref _tgtLightState, TargetedColor, TgtHoldSeconds);
+            Color seenColor = UpdateSpikeLight(ref _seenLightState, SeenColor, SeenHoldSeconds);
+            Color eyeColor;
+            if (_tgtLightState.Phase != SpikeLightPhase.Idle)
+            {
+                eyeColor = tgtColor;
+            }
+            else if (_seenLightState.Phase != SpikeLightPhase.Idle)
+            {
+                eyeColor = seenColor;
+            }
+            else
+            {
+                eyeColor = Themed(0.9f);
+            }
+            _eyeOutlineImage.color = eyeColor;
+            _eyeIrisImage.color = _tgtLightState.Phase != SpikeLightPhase.Idle || _seenLightState.Phase != SpikeLightPhase.Idle
+                ? eyeColor
+                : WarningLightOffColor;
+
+            GetPriorityDirection(out bool priorityAbove, out bool priorityBelow);
+
+            bool missileAbove = false;
+            bool missileBelow = false;
+            if (_playerAircraft != null)
+            {
+                foreach (Missile missile in _sarhMissileContacts)
+                {
+                    UpdateMissileDirectionFlags(missile, ref missileAbove, ref missileBelow);
+                }
+                foreach (Missile missile in _arhMissileContacts.Keys)
+                {
+                    UpdateMissileDirectionFlags(missile, ref missileAbove, ref missileBelow);
+                }
+            }
+
+            bool useFlashColorA = Mathf.Repeat(Time.unscaledTime, SarhFlashInterval * 2f) < SarhFlashInterval;
+            Color missileFlashColor = useFlashColorA ? SarhFlashColorA : SarhFlashColorB;
+
+            if (missileAbove)
+            {
+                _hiChevronImage.color = missileFlashColor;
+            }
+            else
+            {
+                _hiChevronImage.color = priorityAbove ? SeenColor : WarningLightOffColor;
+            }
+
+            if (missileBelow)
+            {
+                _loChevronImage.color = missileFlashColor;
+            }
+            else
+            {
+                _loChevronImage.color = priorityBelow ? TargetedColor : WarningLightOffColor;
+            }
+        }
+
+        private void UpdateMissileDirectionFlags(Missile missile, ref bool above, ref bool below)
+        {
+            if (missile == null)
+            {
+                return;
+            }
+            float deltaY = missile.transform.position.y - _playerAircraft.transform.position.y;
+            if (deltaY > 0f)
+            {
+                above = true;
+            }
+            else if (deltaY < 0f)
+            {
+                below = true;
+            }
         }
 
         // Called directly from OnRadarWarningReceived on every ping that
@@ -1854,6 +2341,126 @@ namespace TraditionalRWR
             return Sprite.Create(texture, new Rect(0f, 0f, width, height), new Vector2(0.5f, 0.5f));
         }
 
+        // Solid filled circle -- used for the compact billboard's iris,
+        // which lights up as a plain dot rather than a bordered box like
+        // everything else in this file.
+        private static Sprite CreateFilledCircleSprite(int diameter)
+        {
+            Texture2D texture = new Texture2D(diameter, diameter, TextureFormat.RGBA32, false);
+            texture.wrapMode = TextureWrapMode.Clamp;
+
+            float radius = diameter / 2f;
+            Vector2 center = new Vector2(radius, radius);
+
+            for (int y = 0; y < diameter; y++)
+            {
+                for (int x = 0; x < diameter; x++)
+                {
+                    float dist = Vector2.Distance(new Vector2(x + 0.5f, y + 0.5f), center);
+                    float alpha = Mathf.Clamp01(radius - dist);
+                    texture.SetPixel(x, y, new Color(1f, 1f, 1f, alpha));
+                }
+            }
+
+            texture.Apply();
+            return Sprite.Create(texture, new Rect(0f, 0f, diameter, diameter), new Vector2(0.5f, 0.5f));
+        }
+
+        // Elliptical ring with two small gaps cut out at its leftmost and
+        // rightmost points -- purely cosmetic, gives the compact billboard's
+        // eye outline an actual eye-shaped read instead of a plain oval.
+        // Distance-to-ellipse is the usual cheap normalized-radius
+        // approximation (exact only for a circle, close enough at this size
+        // for anti-aliasing purposes) rather than true Euclidean distance,
+        // which has no simple closed form for an ellipse.
+        private static Sprite CreateEyeOutlineSprite(int width, int height, float thickness, float gapHalfAngleDegrees)
+        {
+            Texture2D texture = new Texture2D(width, height, TextureFormat.RGBA32, false);
+            texture.wrapMode = TextureWrapMode.Clamp;
+
+            float halfW = width / 2f;
+            float halfH = height / 2f;
+            // Inset the ellipse's own semi-axes by half the stroke
+            // thickness -- otherwise the nominal ellipse (dist=0) itself
+            // touches the texture edge, and the ring's outer half (out to
+            // dist=+thickness/2) has nowhere left to render, clipping it.
+            float a = halfW - (thickness / 2f);
+            float b = halfH - (thickness / 2f);
+            float minAxis = Mathf.Min(a, b);
+
+            for (int y = 0; y < height; y++)
+            {
+                for (int x = 0; x < width; x++)
+                {
+                    float px = (x + 0.5f) - halfW;
+                    float py = (y + 0.5f) - halfH;
+
+                    float normalizedRadius = Mathf.Sqrt(Mathf.Pow(px / a, 2f) + Mathf.Pow(py / b, 2f));
+                    float dist = (normalizedRadius - 1f) * minAxis;
+                    float band = Mathf.Abs(dist) - (thickness / 2f);
+                    float alpha = Mathf.Clamp01(0.5f - band);
+
+                    float angleDeg = Mathf.Atan2(py / b, px / a) * Mathf.Rad2Deg;
+                    float normalizedAngle = ((angleDeg % 360f) + 360f) % 360f;
+                    bool inGap = normalizedAngle <= gapHalfAngleDegrees || normalizedAngle >= 360f - gapHalfAngleDegrees
+                        || Mathf.Abs(normalizedAngle - 180f) <= gapHalfAngleDegrees;
+                    if (inGap)
+                    {
+                        alpha = 0f;
+                    }
+
+                    texture.SetPixel(x, y, new Color(1f, 1f, 1f, alpha));
+                }
+            }
+
+            texture.Apply();
+            return Sprite.Create(texture, new Rect(0f, 0f, width, height), new Vector2(0.5f, 0.5f));
+        }
+
+        private static float DistanceToSegment(Vector2 p, Vector2 a, Vector2 b)
+        {
+            Vector2 ab = b - a;
+            float t = Mathf.Clamp01(Vector2.Dot(p - a, ab) / Vector2.Dot(ab, ab));
+            Vector2 closest = a + t * ab;
+            return Vector2.Distance(p, closest);
+        }
+
+        // Open chevron (two line segments meeting at an apex, no closed
+        // base) -- pointingUp gives the "^" shape for the HI chevron,
+        // otherwise the "v" shape for LO.
+        private static Sprite CreateChevronSprite(int width, int height, float thickness, bool pointingUp)
+        {
+            Texture2D texture = new Texture2D(width, height, TextureFormat.RGBA32, false);
+            texture.wrapMode = TextureWrapMode.Clamp;
+
+            float halfW = width / 2f;
+            float halfH = height / 2f;
+            // Inset every vertex by half the stroke thickness -- a vertex
+            // placed exactly on the texture edge leaves the stroke's outer
+            // half (and the apex's own rounded cap) nowhere to render,
+            // clipping it flat instead of coming to a point.
+            float insetW = halfW - (thickness / 2f);
+            float insetH = halfH - (thickness / 2f);
+
+            Vector2 apex = new Vector2(0f, pointingUp ? insetH : -insetH);
+            Vector2 baseLeft = new Vector2(-insetW, pointingUp ? -insetH : insetH);
+            Vector2 baseRight = new Vector2(insetW, pointingUp ? -insetH : insetH);
+
+            for (int y = 0; y < height; y++)
+            {
+                for (int x = 0; x < width; x++)
+                {
+                    Vector2 p = new Vector2((x + 0.5f) - halfW, (y + 0.5f) - halfH);
+                    float dist = Mathf.Min(DistanceToSegment(p, apex, baseLeft), DistanceToSegment(p, apex, baseRight));
+                    float alpha = Mathf.Clamp01(0.5f - (dist - thickness / 2f));
+                    texture.SetPixel(x, y, new Color(1f, 1f, 1f, alpha));
+                }
+            }
+
+            texture.Apply();
+            return Sprite.Create(texture, new Rect(0f, 0f, width, height), new Vector2(0.5f, 0.5f));
+        }
+
         // --- Live contacts, driven by Aircraft.onRadarWarning ---------------------
         // Plotted on an invisible -50..+50 grid centered on the scope,
         // scaled to scope units and clamped so nothing renders past the
@@ -2042,6 +2649,7 @@ namespace TraditionalRWR
             { "P_Trisurface1", 3 },         // FS-3 Ternion
             { "Aryx_CargoPlane1", 3 },      // MC-260 Chimera
             { "Aryx_Interceptor1", 4 },     // FS-41 Eclipse
+            { "Aryx_PropAttacker1", 0 },    // OA-27 Cavalier
 
             // Playable Ships addon -- makes ship classes flyable, so they're
             // technically Aircraft here and need their own quality entries
@@ -2171,6 +2779,15 @@ namespace TraditionalRWR
         private MissileWarning _missileWarningSystem;
         private bool _missileWarningSubscribed;
         private readonly Dictionary<Unit, int> _sarhThreatCounts = new Dictionary<Unit, int>();
+        // Cached at ON time so OnMissileWarningEnded decrements the exact
+        // same unit that got incremented, instead of re-resolving
+        // GetSarhSourceUnit() a second time and hoping it still agrees. A
+        // SARH seeker's radarSource can apparently drift or go stale between
+        // the two events (seen mostly on ships, which can carry more than
+        // one radar-bearing component) -- re-resolving would then either
+        // miss the original dictionary key entirely (stuck-on threat, never
+        // decremented) or decrement some other unit's count instead.
+        private readonly Dictionary<Missile, Unit> _sarhSourceByMissile = new Dictionary<Missile, Unit>();
         // Rank 0 and Rank 4's IR warning rings (see UpdateIrWarningRing).
         // Just a presence set, not keyed to any per-missile state -- which
         // division(s) it implies gets recomputed fresh every frame, per
@@ -2632,6 +3249,8 @@ namespace TraditionalRWR
 
             _contacts.Clear();
             _sarhThreatCounts.Clear();
+            _sarhSourceByMissile.Clear();
+            _sarhMissileContacts.Clear();
             _arhMissileContacts.Clear();
             _irMissileContacts.Clear();
             _arhConnectingLines.Clear();
@@ -2708,6 +3327,12 @@ namespace TraditionalRWR
             _tgtLightState = default;
             _seenLightState = default;
             _startupPhase = WarningPanelStartupPhase.Done;
+            _compactBillboardRoot = null;
+            _compactBillboardBackground = null;
+            _eyeOutlineImage = null;
+            _eyeIrisImage = null;
+            _hiChevronImage = null;
+            _loChevronImage = null;
         }
 
         // Ground SARH launchers can borrow a nearby radar truck's radar
@@ -2792,6 +3417,8 @@ namespace TraditionalRWR
                 }
                 _arhMissileContacts.Clear();
                 _sarhThreatCounts.Clear();
+                _sarhSourceByMissile.Clear();
+                _sarhMissileContacts.Clear();
             }
 
             _missileWarningSystem = missileWarning;
@@ -2846,7 +3473,15 @@ namespace TraditionalRWR
                     if (sarhSourceUnit != null)
                     {
                         _sarhThreatCounts[sarhSourceUnit] = _sarhThreatCounts.TryGetValue(sarhSourceUnit, out int count) ? count + 1 : 1;
+                        // Remembered so OnMissileWarningEnded decrements this
+                        // exact unit rather than re-resolving (see field comment).
+                        _sarhSourceByMissile[missile] = sarhSourceUnit;
                     }
+                    // The missile object itself, not the source unit -- the
+                    // compact billboard's chevrons need an actual position
+                    // to check above/below, which _sarhThreatCounts alone
+                    // (keyed by launcher/radar, not missile) can't give.
+                    _sarhMissileContacts.Add(missile);
                 }
                 else if (seeker is IRSeeker)
                 {
@@ -2892,11 +3527,23 @@ namespace TraditionalRWR
 
                 _irMissileContacts.Remove(missile);
 
-                // Must resolve the exact same source unit as OnMissileWarningReceived
-                // did when it incremented, or the reference count never balances.
+                // Must decrement the exact same source unit that
+                // OnMissileWarningReceived incremented, or the reference
+                // count never balances -- read back the cached unit from
+                // that event instead of re-resolving GetSarhSourceUnit() a
+                // second time, since it can disagree with itself between the
+                // two calls (see _sarhSourceByMissile's field comment).
+                // Falls back to a fresh resolve only if this missile somehow
+                // has no cached entry (e.g. an ON event we never saw).
                 if (missile.GetComponent<MissileSeeker>() is SARHSeeker sarhSeeker)
                 {
-                    Unit sarhSourceUnit = GetSarhSourceUnit(sarhSeeker, missile);
+                    if (!_sarhSourceByMissile.TryGetValue(missile, out Unit sarhSourceUnit) || sarhSourceUnit == null)
+                    {
+                        sarhSourceUnit = GetSarhSourceUnit(sarhSeeker, missile);
+                    }
+                    _sarhSourceByMissile.Remove(missile);
+                    _sarhMissileContacts.Remove(missile);
+
                     if (sarhSourceUnit != null && _sarhThreatCounts.TryGetValue(sarhSourceUnit, out int count))
                     {
                         if (count <= 1)

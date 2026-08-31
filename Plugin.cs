@@ -5,7 +5,7 @@ using UnityEngine;
 
 namespace TraditionalRWR
 {
-    [BepInPlugin("pavehog727.traditionalrwr", "KaceyTronic-RWR-1.0", "1.3.0")]
+    [BepInPlugin("pavehog727.traditionalrwr", "KaceyTronic-RWR-1.0", "1.4.0")]
     public class Plugin : BaseUnityPlugin
     {
         private void Awake()
@@ -49,13 +49,24 @@ namespace TraditionalRWR
 
             ConfigEntry<bool> warningPanelToggle = Config.Bind(
                 "General",
-                "Warning Panel Toggle",
+                "Billboard Toggle",
                 true,
-                "Shows/Hides the warning panel.");
+                "Shows/Hides the billboard.");
             RwrScopeController.ExtraPanelEnabled = warningPanelToggle.Value;
             warningPanelToggle.SettingChanged += (sender, args) =>
             {
                 RwrScopeController.ExtraPanelEnabled = warningPanelToggle.Value;
+            };
+
+            ConfigEntry<bool> useCompactBillboard = Config.Bind(
+                "General",
+                "Use Compact Billboard",
+                false,
+                "Use the smaller, more stylized version of the Billboard.");
+            RwrScopeController.UseCompactBillboard = useCompactBillboard.Value;
+            useCompactBillboard.SettingChanged += (sender, args) =>
+            {
+                RwrScopeController.UseCompactBillboard = useCompactBillboard.Value;
             };
 
             ConfigEntry<bool> notchLineOnAllRanks = Config.Bind(
@@ -67,6 +78,17 @@ namespace TraditionalRWR
             notchLineOnAllRanks.SettingChanged += (sender, args) =>
             {
                 RwrScopeController.NotchLineOnAllRanks = notchLineOnAllRanks.Value;
+            };
+
+            ConfigEntry<bool> hideMinimap = Config.Bind(
+                "General",
+                "Hide Minimap",
+                false,
+                "Disables the Vanilla Minmap for more LARPing");
+            RwrScopeController.HideMinimap = hideMinimap.Value;
+            hideMinimap.SettingChanged += (sender, args) =>
+            {
+                RwrScopeController.HideMinimap = hideMinimap.Value;
             };
 
             BindRwrQualityOverrides();
@@ -178,6 +200,17 @@ namespace TraditionalRWR
         {
             const string section = "RWR Position";
 
+            ConfigEntry<float> scale = Config.Bind(
+                section,
+                "RWR Scale",
+                1f,
+                new ConfigDescription(
+                    "Resizes the RWR scope. 1.0 is the default size.",
+                    new AcceptableValueRange<float>(0.5f, 2f),
+                    new ConfigurationManagerAttributes { Order = 20 }));
+            RwrScopeController.ScopeScale = scale.Value;
+            scale.SettingChanged += (sender, args) => RwrScopeController.ScopeScale = scale.Value;
+
             // Ranges sized against a 2560x1440 reference (260x260 panel
             // kept fully on-screen at that size). Smaller monitors can
             // still dial in a value that pushes the scope off-screen --
@@ -208,14 +241,25 @@ namespace TraditionalRWR
 
         private void BindWarningPanelPosition()
         {
-            const string section = "Warning Panel Position";
+            const string section = "Billboard Position";
+
+            ConfigEntry<float> scale = Config.Bind(
+                section,
+                "Billboard Scale",
+                1f,
+                new ConfigDescription(
+                    "Resizes the billboard (both the full and compact layouts). 1.0 is the default size.",
+                    new AcceptableValueRange<float>(0.5f, 2f),
+                    new ConfigurationManagerAttributes { Order = 20 }));
+            RwrScopeController.BillboardScale = scale.Value;
+            scale.SettingChanged += (sender, args) => RwrScopeController.BillboardScale = scale.Value;
 
             ConfigEntry<int> positionX = Config.Bind(
                 section,
-                "Warning Panel X Position",
+                "Billboard X Position",
                 0,
                 new ConfigDescription(
-                    "How far from the left edge of the screen the TGT/MSL warning panel sits. Default lines it up with the RWR scope.",
+                    "How far from the left edge of the screen the billboard sits. Default lines it up with the RWR scope.",
                     new AcceptableValueRange<int>(0, 2300),
                     new ConfigurationManagerAttributes { Order = 10 }));
             RwrScopeController.WarningPanelPositionX = positionX.Value;
@@ -223,10 +267,10 @@ namespace TraditionalRWR
 
             ConfigEntry<int> positionY = Config.Bind(
                 section,
-                "Warning Panel Y Position",
+                "Billboard Y Position",
                 716,
                 new ConfigDescription(
-                    "How far up from the bottom edge of the screen the TGT/MSL warning panel sits. Default sits just above the RWR scope.",
+                    "How far up from the bottom edge of the screen the billboard sits. Default sits just above the RWR scope.",
                     new AcceptableValueRange<int>(0, 1180),
                     new ConfigurationManagerAttributes { Order = 0 }));
             RwrScopeController.WarningPanelPositionY = positionY.Value;
@@ -340,12 +384,13 @@ namespace TraditionalRWR
             // its own "Show advanced settings" toggle) -- most users don't
             // have these mods installed and shouldn't see rows for planes
             // they don't have.
-            BindAircraftRwrQualityOverride(perAircraftSection, "F-16M King Viper", "Aryx_F16M_KingViper", "Mod by Aryx.", isAdvanced: true, order: 7);
-            BindAircraftRwrQualityOverride(perAircraftSection, "F-99 Shrike", "Aryx_LightFighter1", "Mod by Aryx.", isAdvanced: true, order: 6);
-            BindAircraftRwrQualityOverride(perAircraftSection, "FS-3 Ternion", "P_Trisurface1", "Mod by Nikkorap, Raikan, ErrorByte, AAA Battery, javiairplane, and Drunk Driving Compilation #42.", isAdvanced: true, order: 5);
-            BindAircraftRwrQualityOverride(perAircraftSection, "FS-41 Eclipse", "Aryx_Interceptor1", "Mod by Aryx.", isAdvanced: true, order: 4);
-            BindAircraftRwrQualityOverride(perAircraftSection, "MC-260 Chimera", "Aryx_CargoPlane1", "Mod by Aryx.", isAdvanced: true, order: 3);
-            BindAircraftRwrQualityOverride(perAircraftSection, "MiG-15", "Aryx_MiG-15", "Mod by Aryx.", isAdvanced: true, order: 2);
+            BindAircraftRwrQualityOverride(perAircraftSection, "F-16M King Viper", "Aryx_F16M_KingViper", "Mod by Aryx.", isAdvanced: true, order: 8);
+            BindAircraftRwrQualityOverride(perAircraftSection, "F-99 Shrike", "Aryx_LightFighter1", "Mod by Aryx.", isAdvanced: true, order: 7);
+            BindAircraftRwrQualityOverride(perAircraftSection, "FS-3 Ternion", "P_Trisurface1", "Mod by Nikkorap, Raikan, ErrorByte, AAA Battery, javiairplane, and Drunk Driving Compilation #42.", isAdvanced: true, order: 6);
+            BindAircraftRwrQualityOverride(perAircraftSection, "FS-41 Eclipse", "Aryx_Interceptor1", "Mod by Aryx.", isAdvanced: true, order: 5);
+            BindAircraftRwrQualityOverride(perAircraftSection, "MC-260 Chimera", "Aryx_CargoPlane1", "Mod by Aryx.", isAdvanced: true, order: 4);
+            BindAircraftRwrQualityOverride(perAircraftSection, "MiG-15", "Aryx_MiG-15", "Mod by Aryx.", isAdvanced: true, order: 3);
+            BindAircraftRwrQualityOverride(perAircraftSection, "OA-27 Cavalier", "Aryx_PropAttacker1", "Mod by Aryx.", isAdvanced: true, order: 2);
             BindAircraftRwrQualityOverride(perAircraftSection, "RAH-72 Knockout", "Aryx_LightHelicopter1", "Mod by Aryx.", isAdvanced: true, order: 1);
         }
 
