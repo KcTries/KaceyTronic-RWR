@@ -2650,6 +2650,7 @@ namespace TraditionalRWR
             { "Aryx_CargoPlane1", 3 },      // MC-260 Chimera
             { "Aryx_Interceptor1", 4 },     // FS-41 Eclipse
             { "Aryx_PropAttacker1", 0 },    // OA-27 Cavalier
+            { "Aryx_F22E_StrikeRaptor", 3 }, // F-22E Strike Raptor
 
             // Playable Ships addon -- makes ship classes flyable, so they're
             // technically Aircraft here and need their own quality entries
@@ -4771,6 +4772,7 @@ namespace TraditionalRWR
             { "P_Trisurface1", "FS3" },        // FS-3 Ternion
             { "Aryx_CargoPlane1", "260" },     // MC-260 Chimera
             { "Aryx_Interceptor1", "F41" },    // FS-41 Eclipse
+            { "Aryx_F22E_StrikeRaptor", "F22" }, // F-22E Strike Raptor
         };
 
         // Ship classes all share the generic code "SHP" (or "PB"), so those
@@ -4903,6 +4905,7 @@ namespace TraditionalRWR
             { "P_Trisurface1", "F+" },         // FS-3 Ternion
             { "Aryx_CargoPlane1", "C" },       // MC-260 Chimera
             { "Aryx_Interceptor1", "???" },    // FS-41 Eclipse
+            { "Aryx_F22E_StrikeRaptor", "F+" }, // F-22E Strike Raptor
         };
 
         private string GetRank0Designation(Unit emitter)
@@ -4950,6 +4953,7 @@ namespace TraditionalRWR
             { "P_Trisurface1", "FS3" },        // FS-3 Ternion
             { "Aryx_CargoPlane1", "260" },     // MC-260 Chimera
             { "Aryx_Interceptor1", "UNK" },    // FS-41 Eclipse
+            { "Aryx_F22E_StrikeRaptor", "F22" }, // F-22E Strike Raptor
         };
 
         private static readonly Dictionary<string, string> Rank1GroundCodeOverrides = new Dictionary<string, string>

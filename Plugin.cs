@@ -5,7 +5,7 @@ using UnityEngine;
 
 namespace TraditionalRWR
 {
-    [BepInPlugin("pavehog727.traditionalrwr", "KaceyTronic-RWR-1.0", "1.4.0")]
+    [BepInPlugin("pavehog727.traditionalrwr", "KaceyTronic-RWR-1.0", "1.4.1")]
     public class Plugin : BaseUnityPlugin
     {
         private void Awake()
@@ -384,7 +384,8 @@ namespace TraditionalRWR
             // its own "Show advanced settings" toggle) -- most users don't
             // have these mods installed and shouldn't see rows for planes
             // they don't have.
-            BindAircraftRwrQualityOverride(perAircraftSection, "F-16M King Viper", "Aryx_F16M_KingViper", "Mod by Aryx.", isAdvanced: true, order: 8);
+            BindAircraftRwrQualityOverride(perAircraftSection, "F-16M King Viper", "Aryx_F16M_KingViper", "Mod by Aryx.", isAdvanced: true, order: 9);
+            BindAircraftRwrQualityOverride(perAircraftSection, "F-22E Strike Raptor", "Aryx_F22E_StrikeRaptor", "Mod by Aryx.", isAdvanced: true, order: 8);
             BindAircraftRwrQualityOverride(perAircraftSection, "F-99 Shrike", "Aryx_LightFighter1", "Mod by Aryx.", isAdvanced: true, order: 7);
             BindAircraftRwrQualityOverride(perAircraftSection, "FS-3 Ternion", "P_Trisurface1", "Mod by Nikkorap, Raikan, ErrorByte, AAA Battery, javiairplane, and Drunk Driving Compilation #42.", isAdvanced: true, order: 6);
             BindAircraftRwrQualityOverride(perAircraftSection, "FS-41 Eclipse", "Aryx_Interceptor1", "Mod by Aryx.", isAdvanced: true, order: 5);

@@ -1,5 +1,10 @@
 # KaceyTronic-RWR Changelog
 
+## 1.4.1 (2026-09-18)
+
+### Added
+- Added Support for Aryx's F-22E Strike Raptor
+
 ## 1.4.0 (2026-08-30)
 
 ### Changed
