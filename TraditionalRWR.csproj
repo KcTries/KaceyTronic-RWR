@@ -3,7 +3,7 @@
   <PropertyGroup>
     <TargetFramework>net472</TargetFramework>
     <LangVersion>latest</LangVersion>
-    <AssemblyName>KaceyTronic-RWR-1.4.1</AssemblyName>
+    <AssemblyName>KaceyTronic-RWR-1.5.0</AssemblyName>
     <Nullable>disable</Nullable>
     <CopyLocalLockFileAssemblies>false</CopyLocalLockFileAssemblies>
   </PropertyGroup>
@@ -45,10 +45,77 @@
       <HintPath>C:\Program Files (x86)\Steam\steamapps\common\Nuclear Option\NuclearOption_Data\Managed\UnityEngine.IMGUIModule.dll</HintPath>
       <Private>false</Private>
     </Reference>
+    <Reference Include="UnityEngine.AudioModule">
+      <HintPath>C:\Program Files (x86)\Steam\steamapps\common\Nuclear Option\NuclearOption_Data\Managed\UnityEngine.AudioModule.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
     <Reference Include="Mirage">
       <HintPath>C:\Program Files (x86)\Steam\steamapps\common\Nuclear Option\NuclearOption_Data\Managed\Mirage.dll</HintPath>
       <Private>false</Private>
     </Reference>
+  </ItemGroup>
+
+  <ItemGroup>
+    <EmbeddedResource Include="Assets\NewAir_KaceyTronic.wav">
+      <LogicalName>TraditionalRWR.Assets.NewAir_KaceyTronic.wav</LogicalName>
+    </EmbeddedResource>
+    <EmbeddedResource Include="Assets\NewGround_Kaceytronic.wav">
+      <LogicalName>TraditionalRWR.Assets.NewGround_Kaceytronic.wav</LogicalName>
+    </EmbeddedResource>
+    <EmbeddedResource Include="Assets\Ping_KaceyTronic.wav">
+      <LogicalName>TraditionalRWR.Assets.Ping_KaceyTronic.wav</LogicalName>
+    </EmbeddedResource>
+    <EmbeddedResource Include="Assets\LaunchWarning_KaceyTronic.wav">
+      <LogicalName>TraditionalRWR.Assets.LaunchWarning_KaceyTronic.wav</LogicalName>
+    </EmbeddedResource>
+    <EmbeddedResource Include="Assets\Tracking_KaceyTronic.wav">
+      <LogicalName>TraditionalRWR.Assets.Tracking_KaceyTronic.wav</LogicalName>
+    </EmbeddedResource>
+    <EmbeddedResource Include="Assets\VTOLVR\NewAir_VTOLVR.wav">
+      <LogicalName>TraditionalRWR.Assets.VTOLVR.NewAir_VTOLVR.wav</LogicalName>
+    </EmbeddedResource>
+    <EmbeddedResource Include="Assets\VTOLVR\NewGround_VTOLVR.wav">
+      <LogicalName>TraditionalRWR.Assets.VTOLVR.NewGround_VTOLVR.wav</LogicalName>
+    </EmbeddedResource>
+    <EmbeddedResource Include="Assets\VTOLVR\Ping_VTOLVR.wav">
+      <LogicalName>TraditionalRWR.Assets.VTOLVR.Ping_VTOLVR.wav</LogicalName>
+    </EmbeddedResource>
+    <EmbeddedResource Include="Assets\VTOLVR\LaunchWarning_VTOLVR.wav">
+      <LogicalName>TraditionalRWR.Assets.VTOLVR.LaunchWarning_VTOLVR.wav</LogicalName>
+    </EmbeddedResource>
+    <EmbeddedResource Include="Assets\VTOLVR\TrackingLoopStart_VTOLVR.wav">
+      <LogicalName>TraditionalRWR.Assets.VTOLVR.TrackingLoopStart_VTOLVR.wav</LogicalName>
+    </EmbeddedResource>
+    <EmbeddedResource Include="Assets\VTOLVR\TrackingLoop_VTOLVR.wav">
+      <LogicalName>TraditionalRWR.Assets.VTOLVR.TrackingLoop_VTOLVR.wav</LogicalName>
+    </EmbeddedResource>
+    <EmbeddedResource Include="Assets\WarThunder\WarThunder_Ping.wav">
+      <LogicalName>TraditionalRWR.Assets.WarThunder.WarThunder_Ping.wav</LogicalName>
+    </EmbeddedResource>
+    <EmbeddedResource Include="Assets\WarThunder\WarThunder_LaunchWarning.wav">
+      <LogicalName>TraditionalRWR.Assets.WarThunder.WarThunder_LaunchWarning.wav</LogicalName>
+    </EmbeddedResource>
+    <EmbeddedResource Include="Assets\WarThunder\WarThunder_TargetingLoop.wav">
+      <LogicalName>TraditionalRWR.Assets.WarThunder.WarThunder_TargetingLoop.wav</LogicalName>
+    </EmbeddedResource>
+    <EmbeddedResource Include="Assets\WarThunder\WarThunder_TrackingLoop.wav">
+      <LogicalName>TraditionalRWR.Assets.WarThunder.WarThunder_TrackingLoop.wav</LogicalName>
+    </EmbeddedResource>
+    <EmbeddedResource Include="Assets\F18\NewAir_F18.wav">
+      <LogicalName>TraditionalRWR.Assets.F18.NewAir_F18.wav</LogicalName>
+    </EmbeddedResource>
+    <EmbeddedResource Include="Assets\F18\NewGround_F18.wav">
+      <LogicalName>TraditionalRWR.Assets.F18.NewGround_F18.wav</LogicalName>
+    </EmbeddedResource>
+    <EmbeddedResource Include="Assets\F18\Ping_F18.wav">
+      <LogicalName>TraditionalRWR.Assets.F18.Ping_F18.wav</LogicalName>
+    </EmbeddedResource>
+    <EmbeddedResource Include="Assets\F18\TargetingLoop_F18.wav">
+      <LogicalName>TraditionalRWR.Assets.F18.TargetingLoop_F18.wav</LogicalName>
+    </EmbeddedResource>
+    <EmbeddedResource Include="Assets\F18\TrackingLoop_F18.wav">
+      <LogicalName>TraditionalRWR.Assets.F18.TrackingLoop_F18.wav</LogicalName>
+    </EmbeddedResource>
   </ItemGroup>
 
 </Project>

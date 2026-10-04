@@ -1,5 +1,30 @@
 # KaceyTronic-RWR Changelog
 
+## 1.5.0 (2026-10-04)
+
+### Added
+- **KR-33 Agni support** (jsonKey `1509_palafighter1`) — defaults to Rank 2, shows as `K33` at Rank 1 and above and `F` on Rank 0 scopes. Counts as a fighter for Threat Tier Organization. Its quality override is an advanced ConfigManager entry like the other modded aircraft.
+- **F/A-18 audio pack** (RWR Audio Pack, Audio) — a fourth custom sound set. Like War Thunder, it has a Targeting loop (a radar source has you targeted) and a separate Tracking loop (a radar-guided missile in flight) that takes priority over it, plus its own new-air, new-ground and ping sounds. It has no Launch Warning sound yet.
+- **RWR Audio Volume** (Audio) — a 1-100 slider for the volume of the custom audio packs. Doesn't affect the vanilla RWR/missile audio. Defaults to 50.
+- **Use Vanilla IR Missile Warning** (Audio) — while custom audio is on, keeps the game's own IR missile warning tone audible and stops the custom Launch Warning from firing for IR missiles. Off by default.
+- **Threat Tier Organization toggle** (General, Ranks 1-4 only) — an alternate placement mode that groups contacts by threat level instead of true range, same idea as a real F-16 RWR: Aware near the outer edge, Critical on the half-range ring, Lethal just outside the center reticle. Bearing is always real either way. Regular contacts default to Aware, upgrade to Critical if targeted or flying a designated fighter airframe (Revoker, Vortex, Ifrit, Vagrant, plus the Shrike/Eclipse/King Viper/Strike Raptor mods), and upgrade to Lethal if actively guiding a missile onto you. ARH missile icons are always Lethal.
+
+### Changed
+- All audio settings now live in their own **Audio** section, right under General: Use Custom Audio, RWR Audio Pack, RWR Audio Volume and Use Vanilla IR Missile Warning. The first three moved from General (and "Vanilla RWR/Missile Audio" became the inverted "Use Custom Audio"), so they reset to their defaults once.
+- VTOLVR pack's Tracking cue is now a proper start/stop loop (a one-shot lead-in followed by a seamless loop body), instead of a one-shot fired per radar ping. A SARH launcher's continuous illumination doesn't generate a repeatable ping the way a search radar does, so the old ping-driven cue could fall silent for the entire duration it was meant to represent. SARH's loop starts/ends with the missile-warning lifecycle (its only signal); ARH's starts on any radar ping at all and ends when that ping goes stale (contact lost), since it has a much more direct signal available. Never layers for multiple simultaneous inbound missiles, and stops only once the last one ends. KaceyTronic's Tracking is untouched (still the original ping-driven one-shot).
+
+### Fixed
+- RWR audio (both vanilla and the new custom KaceyTronic set) continuing to play after ejection/death. The scope never unsubscribed from the disabled aircraft's own radar/missile events, so it kept reacting to pings against a plane the player no longer controlled.
+- TGT and MSL Billboard lights sometimes sticking on after death -- both are derived live from contact/threat-tracking state that's now explicitly cleared the moment the aircraft is disabled, instead of only ever being cleared on a full mission restart.
+
+### Added
+- **Use Custom Audio toggle** (Audio) — mutes the game's own default radar warning sounds (contact blip, new-contact blip) and the missile lock warning audio loop, and plays the selected custom audio pack instead. Off by default, so the game's own audio plays until you turn it on.
+- **Custom RWR audio packs** — a full 5-sound replacement set (new aircraft contact, new ground/naval contact, repeat ping, missile launch warning, missile tracking tone) that plays instead of the vanilla audio whenever "Use Custom Audio" above is turned on, driven entirely by the scope's own contact/threat tracking rather than the vanilla game's own audio triggers. **RWR Audio Pack** (Audio) picks which set — KaceyTronic (default), VTOLVR, or War Thunder, with more planned.
+- **War Thunder audio pack** — the most involved pack yet, with two independent loop tones instead of one: a Targeting loop starts the moment a radar source gives you a "red ping" and stops if that same source stops targeting you or its contact goes stale, while a separate Tracking loop covers an actual radar-guided missile in flight (any ARH ping, or a confirmed SARH launch — the same signal VTOLVR's own loop uses). A SARH launch transfers Targeting straight into Tracking for that source rather than running both at once, and Tracking always takes priority over Targeting generally -- Targeting is muted for as long as Tracking is playing and automatically resumes afterward if it's still logically active, rather than the two ever overlapping. Launch Warning also plays twice per detection (an immediate copy plus one scheduled repeat), with a fresh missile detection before that repeat fires restarting the count from the top instead of stacking. New aircraft/ground contacts and the repeat ping are deliberately all the same sound for this pack specifically.
+
+### Fixed
+- The "VTOLVR" entry in the RWR Audio Pack dropdown showing as spaced-out individual letters ("V T O L V R") -- ConfigManager's own display-name formatter inserts a space before every uppercase letter, not just at a lowercase-to-uppercase boundary, so a normal name like WarThunder reads fine but an all-caps acronym doesn't. Fixed with a `[Description]` attribute on that enum value, which ConfigManager checks first and uses verbatim.
+
 ## 1.4.1 (2026-09-18)
 
 ### Added

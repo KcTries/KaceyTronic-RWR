@@ -33,6 +33,22 @@ namespace TraditionalRWR
         public static bool HideMinimap;
         private bool _minimapWasHiddenByUs;
 
+        // The inverse of "Use Custom Audio" (Audio, see Plugin.cs). Read by
+        // VanillaAudioTogglePatch (Harmony patches on the game's own
+        // RadarWarning/ThreatList audio, entirely separate from this
+        // scope's own visuals) -- defaults true so a fresh install keeps
+        // the vanilla audio players are already used to; this only lets
+        // them opt out once they've got the custom scope to rely on
+        // instead.
+        public static bool VanillaAudioEnabled = true;
+
+        // "Use Vanilla IR Missile Warning" (Audio, see Plugin.cs). Only
+        // matters while custom audio is on (VanillaAudioEnabled false): it
+        // keeps the game's own IR missile alarm audible (see
+        // VanillaAudioTogglePatch) and stops the custom Launch Warning from
+        // firing for IR missiles.
+        public static bool UseVanillaIrWarning;
+
         // We never call Maximize()/Minimize() or touch any map internals
         // that DynamicMap itself needs to keep running -- SpawnQueuedIcons()
         // and UpdateIcons() (called from DynamicMap's own Update()) turned
@@ -213,6 +229,12 @@ namespace TraditionalRWR
 
                 DumpUnitDefinitionsOnce();
                 UpdateMinimapVisibility();
+                // Independent of scope build state -- safe even before
+                // EnsureLoadedAll has ever run (each pack's own Tick handler
+                // null-checks its AudioSources/clips). Currently only
+                // WarThunderAudio uses this, for LaunchWarning's scheduled
+                // second play.
+                RWRAudioLogic.Tick();
 
                 if (_built)
                 {
@@ -597,6 +619,11 @@ namespace TraditionalRWR
 
         private void BuildScope(Transform canvasTransform)
         {
+            // Own AudioSource lives on this same persistent GameObject,
+            // loaded once regardless of how many times the scope itself
+            // gets rebuilt across mission restarts.
+            RWRAudioLogic.EnsureLoadedAll(gameObject);
+
             // Every ring/reticle/tick/diamond built below bakes in a color
             // via Themed()/WithOpacity() at construction time -- without
             // this, they'd bake in whatever ThemeColor etc. happened to
@@ -2651,6 +2678,7 @@ namespace TraditionalRWR
             { "Aryx_Interceptor1", 4 },     // FS-41 Eclipse
             { "Aryx_PropAttacker1", 0 },    // OA-27 Cavalier
             { "Aryx_F22E_StrikeRaptor", 3 }, // F-22E Strike Raptor
+            { "1509_palafighter1", 2 },     // KR-33 Agni
 
             // Playable Ships addon -- makes ship classes flyable, so they're
             // technically Aircraft here and need their own quality entries
@@ -2794,6 +2822,65 @@ namespace TraditionalRWR
         // division(s) it implies gets recomputed fresh every frame, per
         // ring, from each missile's current position.
         private readonly HashSet<Missile> _irMissileContacts = new HashSet<Missile>();
+
+        // ARH/SARH missiles currently being tracked for a looping pack's
+        // Tracking cue (see RWRAudioLogic.NotifyTrackingActive and
+        // VTOLVRAudio's header comment for why one-shot-per-ping doesn't
+        // work for SARH). IR excluded -- it's not "radar guided". The two
+        // seeker types key off different lifecycles, added/removed by
+        // different call sites: SARH has no radar of its own, so its only
+        // signal is MissileWarning ON/OFF (see OnMissileWarningReceived/
+        // Ended); ARH starts on ANY radar ping at all (RegisterArhRadarPing,
+        // not waiting for confirmed guidance) and ends on that ping going
+        // stale (UpdateArhMissileContacts' "contact lost" cleanup), since it
+        // has its own radar and a much more direct signal available.
+        // Edge-triggered either way: only the transition between empty and
+        // non-empty actually notifies, so multiple simultaneous inbound
+        // missiles never restart/layer the loop.
+        private readonly HashSet<Missile> _radarGuidedTrackingMissiles = new HashSet<Missile>();
+
+        private void RegisterRadarGuidedTracking(Missile missile)
+        {
+            bool wasEmpty = _radarGuidedTrackingMissiles.Count == 0;
+            if (_radarGuidedTrackingMissiles.Add(missile) && wasEmpty)
+            {
+                RWRAudioLogic.NotifyTrackingActive(true);
+            }
+        }
+
+        // Radar sources currently giving the player a "red ping"
+        // (e.isTarget, same signal/rank-gating as contact.IsTargeted -- no
+        // red-on-lock at Rank 0, so this stays empty there too) but with no
+        // missile launched yet -- WarThunderAudio's Targeting loop, a
+        // separate concept from Tracking above. Per-emitter, not edge-
+        // triggered-by-missile the way Tracking is: added/removed on every
+        // ping based on that ping's own isTarget value (see
+        // OnRadarWarningReceived), removed when the contact goes stale
+        // (UpdateContacts' expired-contact cleanup), and removed the
+        // instant a SARH launch is confirmed for that same source (the
+        // "transfer to Tracking" case, handled right where
+        // OnMissileWarningReceived resolves sarhSourceUnit) -- Tracking's
+        // own RegisterRadarGuidedTracking call right after that naturally
+        // starts the Tracking loop, so from the audio pack's perspective
+        // this is just an ordinary StopTargeting followed by a
+        // StartTracking, no special-cased "transfer" primitive needed.
+        private readonly HashSet<Unit> _targetingLoopSources = new HashSet<Unit>();
+
+        private void SetTargetingActive(Unit emitter, bool active)
+        {
+            if (active)
+            {
+                bool wasEmpty = _targetingLoopSources.Count == 0;
+                if (_targetingLoopSources.Add(emitter) && wasEmpty)
+                {
+                    RWRAudioLogic.NotifyTargetingActive(true);
+                }
+            }
+            else if (_targetingLoopSources.Remove(emitter) && _targetingLoopSources.Count == 0)
+            {
+                RWRAudioLogic.NotifyTargetingActive(false);
+            }
+        }
 
         private const float MissileResolveDelaySeconds = 1f;
         // Rank 3+: sharper gear resolves an ARH missile's designation faster.
@@ -3170,6 +3257,7 @@ namespace TraditionalRWR
                 {
                     _playerAircraft.onRadarWarning -= OnRadarWarningReceived;
                     _playerAircraft.onJam -= OnJamReceived;
+                    _playerAircraft.onDisableUnit -= OnAircraftDisabled;
                 }
                 catch
                 {
@@ -3180,6 +3268,7 @@ namespace TraditionalRWR
             _playerAircraft = hud.aircraft;
             _playerAircraft.onRadarWarning += OnRadarWarningReceived;
             _playerAircraft.onJam += OnJamReceived;
+            _playerAircraft.onDisableUnit += OnAircraftDisabled;
             _subscribed = true;
 
             _currentRwrQuality = FallbackRwrQuality;
@@ -3204,6 +3293,109 @@ namespace TraditionalRWR
             WriteDebug($"Subscribed to onRadarWarning for aircraft '{_playerAircraft.name}', RWR quality={_currentRwrQuality}.");
         }
 
+        // Ejection/death: the vanilla Aircraft component isn't destroyed
+        // immediately, so without this its onRadarWarning/onMissileWarning
+        // could keep firing into our still-attached handlers -- both custom
+        // KaceyTronic audio and the vanilla audio this replaces would then
+        // keep playing for an aircraft the player no longer controls.
+        // Mirrors the same event vanilla's own RadarWarning/MissileWarning-
+        // Light/ThreatList unsubscribe from. Contact/threat state is cleared
+        // here too, not just the subscriptions -- TGT/MSL are both derived
+        // live every frame from this state (see UpdateFullBillboardContent/
+        // UpdateCompactBillboardContent), so a lock or missile threat still
+        // "active" at the instant of death would otherwise leave them lit
+        // indefinitely, since nothing else would ever naturally end it for
+        // a unit that no longer exists. Guarded on identity in case this
+        // fires late, after EnsureSubscribed() has already moved on to a
+        // new aircraft (fast eject-and-respawn) -- a stale disable event
+        // for the old one must not stomp the new one's live state.
+        private void OnAircraftDisabled(Unit unit)
+        {
+            if (_playerAircraft == null || unit != _playerAircraft)
+            {
+                return;
+            }
+
+            try
+            {
+                _playerAircraft.onRadarWarning -= OnRadarWarningReceived;
+                _playerAircraft.onJam -= OnJamReceived;
+                _playerAircraft.onDisableUnit -= OnAircraftDisabled;
+            }
+            catch
+            {
+                // best-effort unsubscribe from a possibly-stale instance
+            }
+
+            if (_missileWarningSubscribed && _missileWarningSystem != null)
+            {
+                try
+                {
+                    _missileWarningSystem.onMissileWarning -= OnMissileWarningReceived;
+                    _missileWarningSystem.offMissileWarning -= OnMissileWarningEnded;
+                }
+                catch
+                {
+                    // best-effort unsubscribe from a possibly-stale instance
+                }
+            }
+
+            foreach (TrackedContact contact in _contacts.Values)
+            {
+                if (contact.Group != null)
+                {
+                    Destroy(contact.Group.gameObject);
+                }
+            }
+            foreach (ArhMissileContact arhContact in _arhMissileContacts.Values)
+            {
+                if (arhContact.Group != null)
+                {
+                    Destroy(arhContact.Group.gameObject);
+                }
+            }
+            foreach (JamGhostContact ghost in _jamGhostContacts)
+            {
+                if (ghost.Group != null)
+                {
+                    Destroy(ghost.Group.gameObject);
+                }
+            }
+
+            _contacts.Clear();
+            _sarhThreatCounts.Clear();
+            _sarhSourceByMissile.Clear();
+            _sarhMissileContacts.Clear();
+            _arhMissileContacts.Clear();
+            _irMissileContacts.Clear();
+            _jamGhostContacts.Clear();
+            _tgtLightState = default;
+            _seenLightState = default;
+            _lastJamTime = float.NegativeInfinity;
+            _nextJamBatchTime = 0f;
+            _lastJammingUnit = null;
+            _priorityEmitter = null;
+
+            if (_radarGuidedTrackingMissiles.Count > 0)
+            {
+                RWRAudioLogic.NotifyTrackingActive(false);
+            }
+            _radarGuidedTrackingMissiles.Clear();
+            if (_targetingLoopSources.Count > 0)
+            {
+                RWRAudioLogic.NotifyTargetingActive(false);
+            }
+            _targetingLoopSources.Clear();
+
+            _subscribed = false;
+            _playerAircraft = null;
+            _missileWarningSystem = null;
+            _missileWarningSubscribed = false;
+            _missileWarningCheckedAircraft = null;
+
+            WriteDebug($"Aircraft disabled ('{unit?.name}') -- unsubscribed and cleared contact/threat state.");
+        }
+
         private void ResetState()
         {
             if (_subscribed && _playerAircraft != null)
@@ -3212,6 +3404,7 @@ namespace TraditionalRWR
                 {
                     _playerAircraft.onRadarWarning -= OnRadarWarningReceived;
                     _playerAircraft.onJam -= OnJamReceived;
+                    _playerAircraft.onDisableUnit -= OnAircraftDisabled;
                 }
                 catch
                 {
@@ -3258,6 +3451,16 @@ namespace TraditionalRWR
             _jamGhostContacts.Clear();
             _lastJamTime = float.NegativeInfinity;
             _nextJamBatchTime = 0f;
+            if (_radarGuidedTrackingMissiles.Count > 0)
+            {
+                RWRAudioLogic.NotifyTrackingActive(false);
+            }
+            _radarGuidedTrackingMissiles.Clear();
+            if (_targetingLoopSources.Count > 0)
+            {
+                RWRAudioLogic.NotifyTargetingActive(false);
+            }
+            _targetingLoopSources.Clear();
             _playerAircraft = null;
             _subscribed = false;
             _currentRwrQuality = DefaultRwrQuality;
@@ -3440,11 +3643,22 @@ namespace TraditionalRWR
                     return;
                 }
 
+                // Fires once per missile here, same cadence vanilla's own
+                // ThreatList used to add a missile to its alarm system at
+                // (onMissileWarning), regardless of seeker type.
+
                 // seekerMode (active/passive) only tells us whether the
                 // missile's own radar is transmitting -- IR/ARAD/Optical
                 // are just as "passive" as SARH is, so that alone can't
                 // tell them apart. The seeker component's actual type can.
                 MissileSeeker seeker = missile.GetComponent<MissileSeeker>();
+
+                // With "Use Vanilla IR Missile Warning" on, IR missiles are
+                // left to the game's own alarm instead of our Launch Warning.
+                if (!VanillaAudioEnabled && !(UseVanillaIrWarning && seeker is IRSeeker))
+                {
+                    RWRAudioLogic.PlayLaunchWarning();
+                }
 
                 if (seeker is ARHSeeker)
                 {
@@ -3477,12 +3691,27 @@ namespace TraditionalRWR
                         // Remembered so OnMissileWarningEnded decrements this
                         // exact unit rather than re-resolving (see field comment).
                         _sarhSourceByMissile[missile] = sarhSourceUnit;
+                        // WarThunderAudio: a confirmed SARH launch transfers
+                        // this source from the Targeting loop to the
+                        // Tracking loop -- RegisterRadarGuidedTracking just
+                        // below starts Tracking, so this is the "stop
+                        // Targeting" half of that transfer.
+                        if (!VanillaAudioEnabled)
+                        {
+                            SetTargetingActive(sarhSourceUnit, false);
+                        }
                     }
                     // The missile object itself, not the source unit -- the
                     // compact billboard's chevrons need an actual position
                     // to check above/below, which _sarhThreatCounts alone
                     // (keyed by launcher/radar, not missile) can't give.
                     _sarhMissileContacts.Add(missile);
+                    // SARH has no radar of its own to ping with -- the
+                    // launcher's radar is what we detect, and this
+                    // onMissileWarning event is the only signal that a SARH
+                    // threat exists at all, so this is the only place its
+                    // tracking-loop start can key off.
+                    RegisterRadarGuidedTracking(missile);
                 }
                 else if (seeker is IRSeeker)
                 {
@@ -3545,6 +3774,16 @@ namespace TraditionalRWR
                     _sarhSourceByMissile.Remove(missile);
                     _sarhMissileContacts.Remove(missile);
 
+                    // Edge-triggered off, mirroring RegisterRadarGuidedTracking's
+                    // edge-triggered on -- SARH's tracking-loop lifecycle is
+                    // keyed entirely to this event (its only signal), unlike
+                    // ARH's, which ends on radar-ping staleness instead (see
+                    // UpdateArhMissileContacts).
+                    if (_radarGuidedTrackingMissiles.Remove(missile) && _radarGuidedTrackingMissiles.Count == 0)
+                    {
+                        RWRAudioLogic.NotifyTrackingActive(false);
+                    }
+
                     if (sarhSourceUnit != null && _sarhThreatCounts.TryGetValue(sarhSourceUnit, out int count))
                     {
                         if (count <= 1)
@@ -3571,7 +3810,7 @@ namespace TraditionalRWR
                 return;
             }
 
-            RectTransform group = CreateContactGroup(_contactsOverlayRoot, "ArhMissile_" + missile.name, ComputeGridPosition(missile.transform.position));
+            RectTransform group = CreateContactGroup(_contactsOverlayRoot, "ArhMissile_" + missile.name, ApplyTieredArhRange(ComputeGridPosition(missile.transform.position)));
             (RectTransform symbolTransform, Image symbolImage, Text symbolLetter) = BuildMissileSymbol(group, Vector2.zero, "M");
 
             // Rank 0 RWRs can't classify ARH missiles at all -- just the
@@ -3609,6 +3848,21 @@ namespace TraditionalRWR
             if (_arhMissileContacts.TryGetValue(missile, out ArhMissileContact contact))
             {
                 contact.LastRadarPingTime = Time.unscaledTime;
+            }
+
+            if (!VanillaAudioEnabled)
+            {
+                // One-shot packs (PlayTracking) get it on every ping, same as
+                // always. A looping pack instead starts its loop right here
+                // -- on any ARH ping at all, not waiting for MissileWarning
+                // to confirm it's guiding specifically at the player -- and
+                // ends it on radar-ping staleness (contact lost), not on
+                // MissileWarning ending (see UpdateArhMissileContacts' stale
+                // cleanup). RegisterRadarGuidedTracking is idempotent for an
+                // already-tracked missile, so calling it on every ping is
+                // harmless.
+                RWRAudioLogic.PlayTracking();
+                RegisterRadarGuidedTracking(missile);
             }
         }
 
@@ -3676,7 +3930,7 @@ namespace TraditionalRWR
                     continue;
                 }
 
-                Vector2 localPosition = GridToLocalPosition(ComputeGridPosition(missile.transform.position));
+                Vector2 localPosition = GridToLocalPosition(ApplyTieredArhRange(ComputeGridPosition(missile.transform.position)));
                 contact.Group.anchoredPosition = localPosition;
 
                 // Recomputed every frame (rather than once at creation) so
@@ -3743,6 +3997,15 @@ namespace TraditionalRWR
                 foreach (Missile missile in stale)
                 {
                     _arhMissileContacts.Remove(missile);
+
+                    // ARH's tracking-loop lifecycle ends on contact lost
+                    // (radar-ping staleness), not on MissileWarning ending --
+                    // see RegisterArhRadarPing's comment for why it starts on
+                    // any ping rather than waiting for confirmed guidance.
+                    if (_radarGuidedTrackingMissiles.Remove(missile) && _radarGuidedTrackingMissiles.Count == 0)
+                    {
+                        RWRAudioLogic.NotifyTrackingActive(false);
+                    }
                 }
             }
         }
@@ -4176,11 +4439,42 @@ namespace TraditionalRWR
                     return;
                 }
 
-                if (!_contacts.TryGetValue(e.emitter, out TrackedContact contact))
+                bool isNewContact = !_contacts.TryGetValue(e.emitter, out TrackedContact contact);
+                if (isNewContact)
                 {
                     contact = CreateContact(e.emitter);
                     _contacts[e.emitter] = contact;
                     WriteDebug($"New contact: {e.emitter.name} ({e.emitter.GetType().Name})");
+                }
+
+                // Custom KaceyTronic audio replaces the vanilla RWR/missile
+                // audio (RadarWarningBlipTogglePatch/VanillaAudioTogglePatch)
+                // while that toggle is off -- see KaceyTronicAudio's own
+                // header comment. A SARH-guiding source's ping plays the
+                // Tracking cue instead of a plain Ping, same "threat takes
+                // priority over the routine ping" precedence already used
+                // for this contact's own coloring/sibling order elsewhere.
+                if (!VanillaAudioEnabled)
+                {
+                    if (isNewContact)
+                    {
+                        if (e.emitter is Aircraft && !IsTreatedAsShip(e.emitter))
+                        {
+                            RWRAudioLogic.PlayNewAir();
+                        }
+                        else
+                        {
+                            RWRAudioLogic.PlayNewGround();
+                        }
+                    }
+                    else if (_sarhThreatCounts.ContainsKey(e.emitter))
+                    {
+                        RWRAudioLogic.PlayTracking();
+                    }
+                    else
+                    {
+                        RWRAudioLogic.PlayPing();
+                    }
                 }
 
                 contact.LastSeenTime = Time.unscaledTime;
@@ -4193,6 +4487,15 @@ namespace TraditionalRWR
                 contact.IsTargeted = _currentRwrQuality != 0 && e.isTarget;
                 contact.BaseColor = contact.IsTargeted ? TargetedColor : ContactColor;
                 SetContactColor(contact, contact.BaseColor);
+
+                // WarThunderAudio's Targeting loop -- same signal/rank-gating
+                // as contact.IsTargeted right above, not raw e.isTarget (no
+                // red-on-lock loop at Rank 0 either). A no-op for any pack
+                // without a Targeting concept.
+                if (!VanillaAudioEnabled)
+                {
+                    SetTargetingActive(e.emitter, contact.IsTargeted);
+                }
 
                 if (e.isTarget)
                 {
@@ -4244,6 +4547,14 @@ namespace TraditionalRWR
                     if (contact.Group != null)
                     {
                         Destroy(contact.Group.gameObject);
+                    }
+
+                    // WarThunderAudio: a contact going stale (fading off the
+                    // scope entirely) ends its Targeting loop the same way a
+                    // non-red ping or a SARH launch transfer would.
+                    if (!VanillaAudioEnabled)
+                    {
+                        SetTargetingActive(emitter, false);
                     }
 
                     if (expired == null)
@@ -4472,7 +4783,12 @@ namespace TraditionalRWR
 
         private void RepositionContact(TrackedContact contact, Unit emitter)
         {
-            contact.Group.anchoredPosition = GridToLocalPosition(ComputeGridPosition(emitter.transform.position));
+            Vector2 gridPosition = ComputeGridPosition(emitter.transform.position);
+            if (TieredThreatOrganizationEnabled && _currentRwrQuality != 0)
+            {
+                gridPosition = OverrideRangeFraction(gridPosition, RangeFractionForTier(ComputeThreatTier(emitter, contact)));
+            }
+            contact.Group.anchoredPosition = GridToLocalPosition(gridPosition);
         }
 
         private Vector2 ComputeGridPosition(Vector3 worldPosition)
@@ -4773,6 +5089,7 @@ namespace TraditionalRWR
             { "Aryx_CargoPlane1", "260" },     // MC-260 Chimera
             { "Aryx_Interceptor1", "F41" },    // FS-41 Eclipse
             { "Aryx_F22E_StrikeRaptor", "F22" }, // F-22E Strike Raptor
+            { "1509_palafighter1", "K33" },    // KR-33 Agni
         };
 
         // Ship classes all share the generic code "SHP" (or "PB"), so those
@@ -4873,6 +5190,109 @@ namespace TraditionalRWR
                 && ShipTypeOverrideJsonKeys.Contains(emitter.definition.jsonKey);
         }
 
+        // "Threat Tier Organization" (General, see Plugin.cs) -- when
+        // enabled, replaces true-range contact placement on Ranks 1-4
+        // (Rank 0 already has its own quadrant-snapping scheme, untouched
+        // here) with a fixed radius per lethality tier, the same idea as a
+        // real F-16 RWR grouping contacts by threat level rather than by
+        // literal range. Bearing is always real either way -- only the
+        // radial distance from center gets snapped.
+        public static bool TieredThreatOrganizationEnabled;
+
+        internal enum ThreatTier
+        {
+            Aware,
+            Critical,
+            Lethal,
+        }
+
+        // Aware sits at the same outer-edge clamp normal contacts already
+        // max out at (MaxContactRadius); Critical lands exactly on the
+        // half-range ring (0.5 is that ring's own radius fraction, see
+        // BuildHalfRangeRing); Lethal sits just clear of the center
+        // reticle's own 10px half-length.
+        private const float TierAwareRangeFraction = 1f;
+        private const float TierCriticalRangeFraction = 0.5f;
+        private const float TierLethalRangeFraction = 0.18f;
+
+        private static float RangeFractionForTier(ThreatTier tier)
+        {
+            switch (tier)
+            {
+                case ThreatTier.Lethal:
+                    return TierLethalRangeFraction;
+                case ThreatTier.Critical:
+                    return TierCriticalRangeFraction;
+                default:
+                    return TierAwareRangeFraction;
+            }
+        }
+
+        // Default/upgrade ladder: Aware -> Critical (locked onto you, or
+        // flying a designated fighter airframe regardless of lock state) ->
+        // Lethal (actively guiding a missile onto you) -- highest wins.
+        // ARH missile icons are a separate system (see ApplyTieredArhRange)
+        // and are always Lethal outright, not run through this ladder.
+        private ThreatTier ComputeThreatTier(Unit emitter, TrackedContact contact)
+        {
+            if (_sarhThreatCounts.ContainsKey(emitter))
+            {
+                return ThreatTier.Lethal;
+            }
+            if (contact.IsTargeted || IsFighterAircraft(emitter))
+            {
+                return ThreatTier.Critical;
+            }
+            return ThreatTier.Aware;
+        }
+
+        // Keyed by code/jsonKey exactly like TryGetByCodeOrJsonKey expects
+        // -- these airframes count as at least Critical tier regardless of
+        // lock state.
+        private static readonly Dictionary<string, bool> FighterAircraftCodes = new Dictionary<string, bool>
+        {
+            { "FS-12", true }, // Revoker
+            { "FS-20", true }, // Vortex
+            { "KR-67", true }, // Ifrit
+            { "VT-7", true },  // Vagrant
+
+            // Blueprinter addon fighters.
+            { "Aryx_LightFighter1", true },     // F-99 Shrike
+            { "Aryx_Interceptor1", true },      // FS-41 Eclipse
+            { "Aryx_F16M_KingViper", true },    // F-16M King Viper
+            { "Aryx_F22E_StrikeRaptor", true }, // F-22E Strike Raptor
+            { "1509_palafighter1", true },      // KR-33 Agni
+        };
+
+        private static bool IsFighterAircraft(Unit emitter)
+        {
+            return emitter is Aircraft && TryGetByCodeOrJsonKey(FighterAircraftCodes, emitter.definition, out _);
+        }
+
+        // Replaces gridPosition's magnitude while keeping its direction
+        // (real bearing) -- shared by both the per-tier contact placement
+        // and the ARH-missile-is-always-Lethal placement below.
+        private static Vector2 OverrideRangeFraction(Vector2 gridPosition, float rangeFraction)
+        {
+            if (gridPosition == Vector2.zero)
+            {
+                return gridPosition;
+            }
+            return gridPosition.normalized * (rangeFraction * GridExtent);
+        }
+
+        // ARH missile icons are always Lethal under tiered organization --
+        // an actual missile already actively pinging you with its own
+        // radar isn't a judgment call the way a regular contact's tier is.
+        private Vector2 ApplyTieredArhRange(Vector2 gridPosition)
+        {
+            if (TieredThreatOrganizationEnabled && _currentRwrQuality != 0)
+            {
+                return OverrideRangeFraction(gridPosition, TierLethalRangeFraction);
+            }
+            return gridPosition;
+        }
+
         // Ground vehicles and buildings, also keyed by jsonKey. Note
         // radarStation1's jsonKey is lowercase-r, unlike the others.
         private static readonly Dictionary<string, string> GroundCodeOverrides = new Dictionary<string, string>
@@ -4906,6 +5326,7 @@ namespace TraditionalRWR
             { "Aryx_CargoPlane1", "C" },       // MC-260 Chimera
             { "Aryx_Interceptor1", "???" },    // FS-41 Eclipse
             { "Aryx_F22E_StrikeRaptor", "F+" }, // F-22E Strike Raptor
+            { "1509_palafighter1", "F" },      // KR-33 Agni
         };
 
         private string GetRank0Designation(Unit emitter)
@@ -4954,6 +5375,7 @@ namespace TraditionalRWR
             { "Aryx_CargoPlane1", "260" },     // MC-260 Chimera
             { "Aryx_Interceptor1", "UNK" },    // FS-41 Eclipse
             { "Aryx_F22E_StrikeRaptor", "F22" }, // F-22E Strike Raptor
+            { "1509_palafighter1", "K33" },    // KR-33 Agni
         };
 
         private static readonly Dictionary<string, string> Rank1GroundCodeOverrides = new Dictionary<string, string>

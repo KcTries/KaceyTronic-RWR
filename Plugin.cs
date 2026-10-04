@@ -1,11 +1,12 @@
 using System;
 using BepInEx;
 using BepInEx.Configuration;
+using HarmonyLib;
 using UnityEngine;
 
 namespace TraditionalRWR
 {
-    [BepInPlugin("pavehog727.traditionalrwr", "KaceyTronic-RWR-1.0", "1.4.1")]
+    [BepInPlugin("pavehog727.traditionalrwr", "KaceyTronic-RWR", "1.5.0")]
     public class Plugin : BaseUnityPlugin
     {
         private void Awake()
@@ -91,6 +92,79 @@ namespace TraditionalRWR
                 RwrScopeController.HideMinimap = hideMinimap.Value;
             };
 
+            // Audio section. Explicit Orders (higher = higher up) so it reads
+            // top to bottom in this order instead of alphabetically.
+            //
+            // "Use Custom Audio" is the inverse of the internal
+            // VanillaAudioEnabled flag the rest of the mod keys off (the game's
+            // own RWR/missile sounds play unless custom audio is on).
+            ConfigEntry<bool> useCustomAudio = Config.Bind(
+                "Audio",
+                "Use Custom Audio",
+                false,
+                new ConfigDescription(
+                    "Use the custom audio from the dropdown below.",
+                    null,
+                    new ConfigurationManagerAttributes { Order = 40 }));
+            RwrScopeController.VanillaAudioEnabled = !useCustomAudio.Value;
+            useCustomAudio.SettingChanged += (sender, args) =>
+            {
+                RwrScopeController.VanillaAudioEnabled = !useCustomAudio.Value;
+            };
+
+            ConfigEntry<RwrAudioPack> audioPack = Config.Bind(
+                "Audio",
+                "RWR Audio Pack",
+                RwrAudioPack.KaceyTronic,
+                new ConfigDescription(
+                    "Choose what sound pack you want to use.",
+                    null,
+                    new ConfigurationManagerAttributes { Order = 30 }));
+            RWRAudioLogic.SelectedAudioPack = audioPack.Value;
+            audioPack.SettingChanged += (sender, args) =>
+            {
+                RWRAudioLogic.SelectedAudioPack = audioPack.Value;
+            };
+
+            ConfigEntry<int> audioVolume = Config.Bind(
+                "Audio",
+                "RWR Audio Volume",
+                50,
+                new ConfigDescription(
+                    "",
+                    new AcceptableValueRange<int>(1, 100),
+                    new ConfigurationManagerAttributes { Order = 20 }));
+            RWRAudioLogic.SetVolume(audioVolume.Value / 100f);
+            audioVolume.SettingChanged += (sender, args) =>
+            {
+                RWRAudioLogic.SetVolume(audioVolume.Value / 100f);
+            };
+
+            ConfigEntry<bool> useVanillaIrWarning = Config.Bind(
+                "Audio",
+                "Use Vanilla IR Missile Warning",
+                false,
+                new ConfigDescription(
+                    "Uses the default IR missile warning sound and will not trigger launch warnings on IR missiles.",
+                    null,
+                    new ConfigurationManagerAttributes { Order = 10 }));
+            RwrScopeController.UseVanillaIrWarning = useVanillaIrWarning.Value;
+            useVanillaIrWarning.SettingChanged += (sender, args) =>
+            {
+                RwrScopeController.UseVanillaIrWarning = useVanillaIrWarning.Value;
+            };
+
+            ConfigEntry<bool> tieredThreatOrganization = Config.Bind(
+                "General",
+                "Threat Tier Organization",
+                false,
+                "Ranks 1-4 only. Instead of placing contacts at their true range, groups them by threat level like a real F-16 RWR: Aware near the outer edge, Critical on the half-range ring, Lethal just outside the center reticle. Bearing is always real either way.");
+            RwrScopeController.TieredThreatOrganizationEnabled = tieredThreatOrganization.Value;
+            tieredThreatOrganization.SettingChanged += (sender, args) =>
+            {
+                RwrScopeController.TieredThreatOrganizationEnabled = tieredThreatOrganization.Value;
+            };
+
             BindRwrQualityOverrides();
             BindAppearanceSettings();
             BindPositionSettings();
@@ -99,9 +173,13 @@ namespace TraditionalRWR
             // window (ConfigManager orders sections by first-bind order).
             BindSecretsSettings();
 
+            Harmony harmony = new Harmony("pavehog727.traditionalrwr");
+            harmony.PatchAll();
+            VanillaAudioTogglePatch.ApplyManualPatch(harmony);
+
             gameObject.AddComponent<RwrScopeController>();
 
-            Logger.LogInfo($"KaceyTronic-RWR-1.0 loaded — scope overlay created, max range {maxRangeKm.Value}km.");
+            Logger.LogInfo($"KaceyTronic-RWR 1.5.0 loaded — scope overlay created, max range {maxRangeKm.Value}km.");
         }
 
         // ConfigManager sorts entries alphabetically within a section
@@ -384,11 +462,12 @@ namespace TraditionalRWR
             // its own "Show advanced settings" toggle) -- most users don't
             // have these mods installed and shouldn't see rows for planes
             // they don't have.
-            BindAircraftRwrQualityOverride(perAircraftSection, "F-16M King Viper", "Aryx_F16M_KingViper", "Mod by Aryx.", isAdvanced: true, order: 9);
-            BindAircraftRwrQualityOverride(perAircraftSection, "F-22E Strike Raptor", "Aryx_F22E_StrikeRaptor", "Mod by Aryx.", isAdvanced: true, order: 8);
-            BindAircraftRwrQualityOverride(perAircraftSection, "F-99 Shrike", "Aryx_LightFighter1", "Mod by Aryx.", isAdvanced: true, order: 7);
-            BindAircraftRwrQualityOverride(perAircraftSection, "FS-3 Ternion", "P_Trisurface1", "Mod by Nikkorap, Raikan, ErrorByte, AAA Battery, javiairplane, and Drunk Driving Compilation #42.", isAdvanced: true, order: 6);
-            BindAircraftRwrQualityOverride(perAircraftSection, "FS-41 Eclipse", "Aryx_Interceptor1", "Mod by Aryx.", isAdvanced: true, order: 5);
+            BindAircraftRwrQualityOverride(perAircraftSection, "F-16M King Viper", "Aryx_F16M_KingViper", "Mod by Aryx.", isAdvanced: true, order: 10);
+            BindAircraftRwrQualityOverride(perAircraftSection, "F-22E Strike Raptor", "Aryx_F22E_StrikeRaptor", "Mod by Aryx.", isAdvanced: true, order: 9);
+            BindAircraftRwrQualityOverride(perAircraftSection, "F-99 Shrike", "Aryx_LightFighter1", "Mod by Aryx.", isAdvanced: true, order: 8);
+            BindAircraftRwrQualityOverride(perAircraftSection, "FS-3 Ternion", "P_Trisurface1", "Mod by Nikkorap, Raikan, ErrorByte, AAA Battery, javiairplane, and Drunk Driving Compilation #42.", isAdvanced: true, order: 7);
+            BindAircraftRwrQualityOverride(perAircraftSection, "FS-41 Eclipse", "Aryx_Interceptor1", "Mod by Aryx.", isAdvanced: true, order: 6);
+            BindAircraftRwrQualityOverride(perAircraftSection, "KR-33 Agni", "1509_palafighter1", "Mod by Phoenix1509, KermiGodFrog, Javiairplane, and OliveFox.", isAdvanced: true, order: 5);
             BindAircraftRwrQualityOverride(perAircraftSection, "MC-260 Chimera", "Aryx_CargoPlane1", "Mod by Aryx.", isAdvanced: true, order: 4);
             BindAircraftRwrQualityOverride(perAircraftSection, "MiG-15", "Aryx_MiG-15", "Mod by Aryx.", isAdvanced: true, order: 3);
             BindAircraftRwrQualityOverride(perAircraftSection, "OA-27 Cavalier", "Aryx_PropAttacker1", "Mod by Aryx.", isAdvanced: true, order: 2);
